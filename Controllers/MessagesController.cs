@@ -306,7 +306,7 @@ public class MessagesController : ControllerBase
             .Cast<int?>()
             .FirstOrDefault();
 
-        ChatMessageDto? reply = null;
+        ChatMessageReplyDto? reply = null;
         if (message.ReplyToMessageId.HasValue && users.Count > 0)
         {
             reply = new ChatMessageReplyDto { Id = message.ReplyToMessageId.Value };

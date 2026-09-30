@@ -1,0 +1,10 @@
+# .NET build and IDE artifacts
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Local overrides (keep credentials out of Git)
+appsettings.Local.json
+appsettings.*.local.json

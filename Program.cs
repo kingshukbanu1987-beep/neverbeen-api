@@ -137,11 +137,11 @@ using (var scope = app.Services.CreateScope())
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+// Swagger UI at /swagger - enabled in every environment so the deployed API can be
+// explored and tested (e.g. on the VPS). Keep it behind Development only if you
+// prefer not to expose the API documentation publicly.
+app.UseSwagger();
+app.UseSwaggerUI();
 
 app.UseCors();
 app.UseAuthentication();

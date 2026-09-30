@@ -53,48 +53,37 @@ NeverBeen.API/
 
 ## Run locally
 
-1. Install the **.NET 7 SDK** (the project targets `net7.0`) and PostgreSQL,
-   or use a Supabase PostgreSQL database. Note: .NET 7 is out of support;
-   upgrading the project to a supported .NET release is recommended separately.
-2. Create an **empty** PostgreSQL database named `neverbeen` (for example,
-   `createdb -U postgres neverbeen`). On startup, the API uses EF Core
-   `EnsureCreated` when no migrations exist, then seeds countries/cities.
-   This checkout does **not** contain the previously mentioned sibling
-   `NeverBeen.Database/schema.sql`; use a fresh empty database for this path.
-3. From the repository root, configure local credentials using .NET user secrets
-   (stored outside the repository). Replace the example password and signing key
-   with your own values:
-
-   ```bash
-   dotnet user-secrets set "ConnectionStrings:Supabase" 'Host=localhost;Port=5432;Database=neverbeen;Username=postgres;Password=YOUR_LOCAL_PASSWORD;SSL Mode=Prefer'
-   dotnet user-secrets set "Jwt:SigningKey" 'YOUR_RANDOM_SECRET_AT_LEAST_32_BYTES_LONG'
-   ```
-
-   For Supabase instead, set `ConnectionStrings:Supabase` to your project's
-   PostgreSQL connection string (with its actual host, credentials and SSL
-   settings). Never commit credentials to `appsettings*.json`. If you need OAuth
-   login, also set `OAuth:Google`, `OAuth:Facebook` or `OAuth:Microsoft` client
-   settings and redirect URIs; the API can start without OAuth credentials.
-   Configure `Cors:AllowedOrigins` for any other frontend origin.
-4. Run from a terminal:
+1. Install the **.NET 7 SDK** (the project targets `net7.0`). Note: .NET 7 is out of
+   support; upgrading the project to a supported .NET release is recommended separately.
+2. **Configuration is already set** in `appsettings.json` for the live Supabase
+   project (`ConnectionStrings:Supabase`), the deployed Angular site
+   (`Cors:AllowedOrigins` = `https://youneverbeen.kingshukbanu1987.workers.dev`) and
+   the frontend OAuth callback (`OAuth:FrontendRedirectUri`). On first start the API
+   creates all tables in Supabase's `public` schema (via `CreateTablesAsync` — not
+   `EnsureCreated`, which is a no-op on Supabase) and seeds countries/cities.
+   Startup requires a reachable database and will fail if schema creation or
+   seeding fails.
+3. Run from a terminal:
 
    ```bash
    dotnet restore neverbeen-api.sln
    dotnet run --project NeverBeen.API.csproj --launch-profile http
    ```
 
-   Open **http://localhost:5080/swagger**. Swagger is only enabled in
-   Development (the `http` launch profile sets that environment). `/health`
-   checks the database connection. Startup requires a reachable database and
-   will fail if schema creation or seeding fails.
+   Open **http://localhost:5080/swagger**. Swagger is enabled in every environment
+   so the deployed API can be tested too. `/health` checks the database connection.
 
 **Visual Studio:** Open `neverbeen-api.sln`, select the `http` launch profile,
-then press F5. The user secrets above are also read when running in Development
-from Visual Studio. You can run without the `.sln` using the `.csproj` directly.
+then press F5. You can run without the `.sln` using the `.csproj` directly.
 
-A database password was previously checked into `appsettings.json`. Removing
-it from the current file does not remove it from Git history: **rotate that
-password in the database** before using it again.
+**Deploying to a Windows VPS / IIS and wiring the Angular site to this API:**
+see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
+
+> **Security:** This repository is **public** and `appsettings.json` contains the
+> Supabase database password and the JWT signing key in plain text. The database
+> password has also been committed to Git history before: **rotate it in Supabase**
+> (Database settings → Reset database password) and update the connection string.
+> Anyone with the JWT signing key can forge login tokens — keep both secret.
 
 ## Notes
 

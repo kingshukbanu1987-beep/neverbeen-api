@@ -88,7 +88,7 @@ public class GalleryController : ControllerBase
         if (photo == null)
             return NotFound();
 
-        var requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
+        int? requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
         if (requesterId != photo.UserId)
         {
             var isPublic = await _db.UserSettings
@@ -115,7 +115,7 @@ public class GalleryController : ControllerBase
         if (user == null)
             return NotFound();
 
-        var requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
+        int? requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
         if (requesterId != userId && user.Settings?.PublicProfileEnabled == false)
             return Forbid();
 

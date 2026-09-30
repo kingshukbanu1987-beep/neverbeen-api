@@ -46,7 +46,7 @@ public class ProfileController : ControllerBase
         if (user == null)
             return NotFound();
 
-        var requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
+        int? requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
         if (requesterId != id && user.Settings?.PublicProfileEnabled == false)
             return Forbid();
 
@@ -210,7 +210,7 @@ public class ProfileController : ControllerBase
         if (user == null || user.ProfilePhotoData == null)
             return NotFound();
 
-        var requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
+        int? requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
         if (requesterId != id && user.Settings?.PublicProfileEnabled == false)
             return Forbid();
 

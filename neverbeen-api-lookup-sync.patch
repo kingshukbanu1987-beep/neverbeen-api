@@ -1,0 +1,286 @@
+From 2f1630ce1714f1f12403c3b6b4a83acddff382f1 Mon Sep 17 00:00:00 2001
+From: kingshukbanu1987-beep
+ <329612224+kingshukbanu1987-beep@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:08:00 +0000
+Subject: [PATCH] Complete the Countries/Cities lookup tables on every start
+
+neverbeen-database/seed.sql seeds only 10 countries and 24 cities, so
+DbInitializer's "if (!await _db.Countries.AnyAsync())" guard found the table
+non-empty and the API's own 184-country / 1006-city seed never ran. Every
+registration from a country outside that short list - and even a city whose
+name the seed.sql version spelled differently (Bangalore vs Bengaluru,
+Frankfurt vs Frankfurt am Main) - then failed the country/city cross-check in
+RegistrationController with
+"The selected city does not belong to the selected country."
+
+DbInitializer now reconciles the lookup tables with Data/GeoSeedData.cs on
+every start instead of only seeding into an empty table:
+
+* a country already stored (matched by ISO code, then by name) keeps its id and
+  gains any missing cities;
+* a country that is not stored yet is added together with its cities, so a
+  database seeded from a shorter list is completed on the next deploy;
+* legacy city names are renamed in place, keeping the row id so members that
+  already reference the row stay valid;
+* nothing is ever deleted;
+* when there is nothing to do the method returns without touching the
+  database, so repeated starts are free and idempotent.
+
+A failed save is logged as a warning rather than aborting startup (a
+concurrent start can lose the race for the same rows to the unique index); the
+next start retries and finishes the job.
+
+Verified with a line-for-line port of the new logic run against the real
+GeoSeedData and seed.sql data: seed.sql state -> 184 countries / 1006 cities
+with ids preserved (India 1, Kolkata 1, Bangalore 4 renamed to Bengaluru) and
+the second run adding nothing; an API-seeded database -> no-op; an empty
+database -> full seed; a database that already has both the legacy and the
+current city name -> no rename. The file parses clean with a C# grammar
+(no .NET SDK is available in this sandbox to run dotnet build).
+
+Also documents the lookup sync in the README, including the check to run after
+a deploy (GET /api/lookup/countries should return 184 entries).
+---
+ Data/DbInitializer.cs | 160 ++++++++++++++++++++++++++++++++++++++----
+ README.md             |  21 ++++--
+ 2 files changed, 165 insertions(+), 16 deletions(-)
+
+diff --git a/Data/DbInitializer.cs b/Data/DbInitializer.cs
+index 0d711f8..795ce1b 100644
+--- a/Data/DbInitializer.cs
++++ b/Data/DbInitializer.cs
+@@ -1,3 +1,5 @@
++using System.Globalization;
++using System.Text;
+ using Microsoft.EntityFrameworkCore;
+ using Microsoft.EntityFrameworkCore.Infrastructure;
+ using Microsoft.EntityFrameworkCore.Storage;
+@@ -15,7 +17,10 @@ public interface IDbInitializer
+ ///  1. Creates the database schema. If EF migrations exist for this context they are
+ ///     applied with <c>MigrateAsync()</c>; otherwise the schema is created from the
+ ///     current EF model with <c>CreateTablesAsync()</c>.
+-///  2. Seeds the Countries/Cities lookup tables used by the registration drop-downs.
++///  2. Brings the Countries/Cities lookup tables - the lists behind the registration
++///     and profile drop-downs - in step with <see cref="GeoSeedData"/> on every start,
++///     so a database seeded from a shorter list (neverbeen-database/seed.sql ships 10
++///     countries) still ends up with every country the API can validate a member against.
+ /// </summary>
+ public class DbInitializer : IDbInitializer
+ {
+@@ -52,25 +57,156 @@ public class DbInitializer : IDbInitializer
+             _logger.LogInformation("Database schema already exists - skipping creation.");
+         }
+ 
+-        if (!await _db.Countries.AnyAsync())
++        // Countries/Cities are reconciled on every start (not only into an empty table):
++        // a database seeded earlier from a shorter list - neverbeen-database/seed.sql has
++        // 10 countries - would otherwise never receive the full registration list, and the
++        // registration endpoint would reject every other country with
++        // "The selected city does not belong to the selected country."
++        await SyncLookupsAsync();
++    }
++
++    /// <summary>
++    /// City rows an earlier seed stored under a name <see cref="GeoSeedData"/> has since
++    /// renamed, so the registration page - which offers the current names - can still use them.
++    /// The row keeps its id, so members already pointing at it stay valid.
++    /// </summary>
++    private static readonly (string IsoCode2, string Legacy, string Current)[] LegacyCityRenames =
++    {
++        ("DE", "Frankfurt", "Frankfurt am Main"),
++        ("IN", "Bangalore", "Bengaluru"),
++    };
++
++    /// <summary>
++    /// Brings Countries/Cities in step with <see cref="GeoSeedData"/>:
++    ///  * a country that is already stored (matched by ISO code, then by name) keeps its id
++    ///    and gains any missing cities;
++    ///  * a country that is not stored yet is added with all of its cities, so a database
++    ///    seeded from a short list still ends up with the full registration list;
++    ///  * legacy city names are renamed in place;
++    ///  * every insert is skipped when the row is already there, so running this again (or
++    ///    starting a second instance) changes nothing.
++    /// Rows are never deleted: members may already reference them.
++    /// </summary>
++    private async Task SyncLookupsAsync()
++    {
++        var seed = GeoSeedData.GetCountries();
++
++        var countries = await _db.Countries.Include(c => c.Cities).ToListAsync();
++
++        var byIso = new Dictionary<string, Country>(StringComparer.OrdinalIgnoreCase);
++        var byName = new Dictionary<string, Country>(StringComparer.OrdinalIgnoreCase);
++        foreach (var country in countries)
+         {
+-            var seed = GeoSeedData.GetCountries();
+-            foreach (var country in seed)
++            byIso[country.IsoCode2] = country;
++            byName[Normalize(country.Name)] = country;
++        }
++
++        var addedCountries = 0;
++        var addedCities = 0;
++        var renamedCities = 0;
++
++        foreach (var seeded in seed)
++        {
++            var country =
++                byIso.TryGetValue(seeded.IsoCode2, out var byCode) ? byCode :
++                byName.TryGetValue(Normalize(seeded.Name), out var byStoredName) ? byStoredName : null;
++
++            if (country == null)
+             {
+-                var entity = new Country
++                country = new Country
+                 {
+-                    IsoCode2 = country.IsoCode2,
+-                    Name = country.Name,
+-                    PhoneCode = country.PhoneCode
++                    IsoCode2 = seeded.IsoCode2,
++                    Name = seeded.Name,
++                    PhoneCode = seeded.PhoneCode
+                 };
+-                foreach (var city in country.Cities)
+-                    entity.Cities.Add(new City { Name = city });
+-                _db.Countries.Add(entity);
++                foreach (var city in seeded.Cities)
++                    country.Cities.Add(new City { Name = city });
++
++                _db.Countries.Add(country);
++                byIso[seeded.IsoCode2] = country;
++                byName[Normalize(seeded.Name)] = country;
++                addedCountries++;
++                addedCities += seeded.Cities.Count;
++                continue;
+             }
+ 
++            // City rows of this country, keyed by a case- and accent-insensitive name.
++            var stored = new Dictionary<string, City>(StringComparer.OrdinalIgnoreCase);
++            foreach (var city in country.Cities)
++                stored[Normalize(city.Name)] = city;
++
++            foreach (var (isoCode2, legacyName, currentName) in LegacyCityRenames)
++            {
++                if (!string.Equals(isoCode2, seeded.IsoCode2, StringComparison.OrdinalIgnoreCase))
++                    continue;
++
++                var legacyKey = Normalize(legacyName);
++                var currentKey = Normalize(currentName);
++                // Only when the renamed row is still the one the API offers (not when a row
++                // with the current name already exists as well).
++                if (stored.TryGetValue(legacyKey, out var legacy) && !stored.ContainsKey(currentKey))
++                {
++                    legacy.Name = currentName;
++                    stored.Remove(legacyKey);
++                    stored[currentKey] = legacy;
++                    renamedCities++;
++                }
++            }
++
++            foreach (var city in seeded.Cities)
++            {
++                var key = Normalize(city);
++                if (stored.ContainsKey(key))
++                    continue;
++
++                var entity = new City { Name = city };
++                country.Cities.Add(entity);
++                stored[key] = entity;
++                addedCities++;
++            }
++        }
++
++        if (addedCountries == 0 && addedCities == 0 && renamedCities == 0)
++        {
++            _logger.LogInformation(
++                "Lookup data is already up to date ({CountryCount} countries).", seed.Count);
++            return;
++        }
++
++        try
++        {
+             await _db.SaveChangesAsync();
+-            _logger.LogInformation("Seeded {CountryCount} countries and their cities.", seed.Count);
+         }
++        catch (DbUpdateException ex)
++        {
++            // A concurrent first start can win the race for the same rows - the unique index
++            // then rejects the duplicate. The next start finishes the job; the API must never
++            // fail to boot because of lookup data.
++            _logger.LogWarning(ex, "Lookup sync could not be saved - it will be retried on the next start.");
++            return;
++        }
++
++        _logger.LogInformation(
++            "Lookup sync complete: {AddedCountries} countries and {AddedCities} cities added, {RenamedCities} cities renamed.",
++            addedCountries, addedCities, renamedCities);
++    }
++
++    /// <summary>Case- and accent-insensitive key used to compare names between seeds.</summary>
++    private static string Normalize(string name)
++    {
++        var decomposed = name.Normalize(NormalizationForm.FormD);
++        var letters = new StringBuilder(decomposed.Length);
++        foreach (var ch in decomposed)
++        {
++            if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
++                letters.Append(ch);
++        }
++
++        var key = new StringBuilder(letters.Length);
++        foreach (var ch in letters.ToString())
++            key.Append(char.IsLetterOrDigit(ch) ? char.ToLowerInvariant(ch) : ' ');
++
++        return string.Join(' ', key.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+     }
+ 
+     /// <summary>
+diff --git a/README.md b/README.md
+index d8d5707..01edbfb 100644
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@ website, backed by **Supabase (PostgreSQL)**. It persists every community featur
+ | Circles | Travel circles (owner/admins/members), archive, group chat |
+ | Notifications | Companionship, likes, comments, follows, tags → unread badge |
+ | Security | Login devices (block / remove), abuse reports, blocked users, hidden posts |
+-| Lookups | Countries / cities (seeded at first start) + professions / genders |
++| Lookups | Countries / cities (reconciled with `Data/GeoSeedData.cs` on every start) + professions / genders |
+ 
+ ## Solution layout
+ 
+@@ -60,9 +60,9 @@ NeverBeen.API/
+    (`Cors:AllowedOrigins` = `https://youneverbeen.kingshukbanu1987.workers.dev`) and
+    the frontend OAuth callback (`OAuth:FrontendRedirectUri`). On first start the API
+    creates all tables in Supabase's `public` schema (via `CreateTablesAsync` — not
+-   `EnsureCreated`, which is a no-op on Supabase) and seeds countries/cities.
+-   Startup requires a reachable database and will fail if schema creation or
+-   seeding fails.
++   `EnsureCreated`, which is a no-op on Supabase) and brings the Countries/Cities
++   lookup tables in step with the seed. Startup requires a reachable database and will
++   fail if schema creation fails.
+ 3. Run from a terminal:
+ 
+    ```bash
+@@ -87,6 +87,19 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
+ 
+ ## Notes
+ 
++- **Lookup data (`Countries` / `Cities`).** `DbInitializer.SyncLookupsAsync()` reconciles
++  the tables with `Data/GeoSeedData.cs` (184 countries, 1006 cities) on **every** start:
++  countries already stored keep their ids and gain missing cities, countries that are not
++  stored yet are added, and two city rows seeded under older names are renamed in place
++  (`Bangalore` → `Bengaluru`, `Frankfurt` → `Frankfurt am Main`). Rows are never deleted and
++  re-running adds nothing, so a database seeded from a shorter list — for example
++  `neverbeen-database/seed.sql`, which ships 10 countries — is completed automatically on the
++  next deploy instead of being left with only those 10. This matters because
++  `POST /api/registration` and `PUT /api/profile` validate the submitted pair against the
++  `Cities` row and answer *"The selected city does not belong to the selected country."*
++  for any city the table does not know. After a deploy, check it with
++  `GET /api/lookup/countries` (expect 184 entries) and
++  `GET /api/lookup/countries/1/cities` (expect the cities of Andorra).
+ - Auth model: OAuth SSO issues a JWT (`POST /api/auth/oauth/login`); registration
+   (`POST /api/registration`) fills the profile and flips `Users.Status`
+   `Pending → Active`. Every `[Authorize]` endpoint expects `Authorization: Bearer <jwt>`.
+-- 
+2.39.5
+

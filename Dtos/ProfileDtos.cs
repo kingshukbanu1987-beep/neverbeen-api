@@ -8,6 +8,13 @@ public class ProfileDto
 {
     public int Id { get; set; }
     public string? FullName { get; set; }
+
+    /// <summary>First name (own column on the member row); split out of FullName when empty.</summary>
+    public string? FirstName { get; set; }
+
+    /// <summary>Last name / surname (own column on the member row).</summary>
+    public string? LastName { get; set; }
+
     public string Email { get; set; } = string.Empty;
     public string? Gender { get; set; }
     public DateTime? DateOfBirth { get; set; }
@@ -18,6 +25,10 @@ public class ProfileDto
     public string? CountryName { get; set; }
     public int? CityId { get; set; }
     public string? CityName { get; set; }
+
+    /// <summary>State / province as typed on the registration page (Users.State).</summary>
+    public string? State { get; set; }
+
     public string? Pincode { get; set; }
     public string? ContactNumber { get; set; }
     public string? PostalAddress { get; set; }
@@ -97,6 +108,12 @@ public class UpdateProfileRequest
     [System.ComponentModel.DataAnnotations.MaxLength(200)]
     public string? FullName { get; set; }
 
+    [System.ComponentModel.DataAnnotations.MaxLength(100)]
+    public string? FirstName { get; set; }
+
+    [System.ComponentModel.DataAnnotations.MaxLength(100)]
+    public string? LastName { get; set; }
+
     [System.ComponentModel.DataAnnotations.MaxLength(20)]
     public string? Gender { get; set; }
 
@@ -104,6 +121,9 @@ public class UpdateProfileRequest
 
     public int? CountryId { get; set; }
     public int? CityId { get; set; }
+
+    [System.ComponentModel.DataAnnotations.MaxLength(100)]
+    public string? State { get; set; }
 
     [System.ComponentModel.DataAnnotations.MaxLength(20)]
     public string? Pincode { get; set; }

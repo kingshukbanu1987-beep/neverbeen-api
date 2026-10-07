@@ -41,6 +41,10 @@ public static class ProfileMapper
         {
             Id = user.Id,
             FullName = user.FullName,
+            // Own columns on the member row; older rows only have the full name, so the
+            // first / last name is split out of it when the column is empty.
+            FirstName = SplitFirstName(user),
+            LastName = SplitLastName(user),
             Email = user.Email,
             Gender = user.Gender,
             DateOfBirth = user.DateOfBirth,
@@ -49,6 +53,7 @@ public static class ProfileMapper
             CountryName = user.Country?.Name,
             CityId = user.CityId,
             CityName = user.City?.Name,
+            State = user.State,
             Pincode = user.Pincode,
             ContactNumber = user.ContactNumber,
             PostalAddress = user.PostalAddress,
@@ -67,6 +72,35 @@ public static class ProfileMapper
             CommentCount = commentCount
         };
     }
+
+    /// <summary>
+    /// First name of a member: the stored <c>Users.FirstName</c> column when it is filled,
+    /// otherwise the first word of the full name (rows created before the column was
+    /// populated).
+    /// </summary>
+    private static string? SplitFirstName(UserProfile user)
+    {
+        if (!string.IsNullOrWhiteSpace(user.FirstName))
+            return user.FirstName.Trim();
+        var words = NameWords(user.FullName);
+        return words.Length > 0 ? words[0] : null;
+    }
+
+    /// <summary>
+    /// Last name of a member: the stored <c>Users.LastName</c> column when it is filled,
+    /// otherwise everything after the first word of the full name.
+    /// </summary>
+    private static string? SplitLastName(UserProfile user)
+    {
+        if (!string.IsNullOrWhiteSpace(user.LastName))
+            return user.LastName.Trim();
+        var words = NameWords(user.FullName);
+        return words.Length > 1 ? string.Join(' ', words.Skip(1)) : null;
+    }
+
+    private static string[] NameWords(string? fullName) =>
+        (fullName ?? string.Empty)
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     public static int? CalculateAge(DateTime? dateOfBirth)
     {

@@ -1,5 +1,15 @@
 # Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
 # More GitHub Actions for Azure: https://github.com/Azure/actions
+#
+# ---------------------------------------------------------------------------
+# IMPORTANT - every `dotnet` command below names the project explicitly.
+# This repository root contains BOTH a solution (neverbeen-api.sln) and a
+# project (NeverBeen.API.csproj), so a bare `dotnet build` / `dotnet publish`
+# aborts with:
+#     MSBUILD : error MSB1011: Specify which project or solution file to use
+#     because this folder contains more than one project or solution file.
+# That is why the commands use ${{ env.PROJECT_PATH }} - do not remove it.
+# ---------------------------------------------------------------------------
 
 name: Build and deploy ASP.Net Core app to Azure Web App - neverbeen-api-kingshuk
 
@@ -8,6 +18,16 @@ on:
     branches:
       - 'main'
   workflow_dispatch:
+
+env:
+  # Target App Service
+  AZURE_WEBAPP_NAME: neverbeen-api-kingshuk
+  AZURE_WEBAPP_SLOT: Production
+  # THIS is the file that must be passed to every dotnet command (see note above)
+  PROJECT_PATH: NeverBeen.API.csproj
+  PUBLISH_PATH: publish
+  CONFIGURATION: Release
+  DOTNET_VERSION: '8.x'
 
 jobs:
   build:
@@ -21,19 +41,22 @@ jobs:
       - name: Set up .NET Core
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.x'
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: dotnet restore
+        run: dotnet restore ${{ env.PROJECT_PATH }}
 
       - name: Build with dotnet
-        run: dotnet build --configuration Release
+        run: dotnet build ${{ env.PROJECT_PATH }} --configuration ${{ env.CONFIGURATION }} --no-restore
 
       - name: dotnet publish
-        run: dotnet publish -c Release -o "${{env.DOTNET_ROOT}}/myapp"
+        run: dotnet publish ${{ env.PROJECT_PATH }} --configuration ${{ env.CONFIGURATION }} --no-build --output ${{ env.PUBLISH_PATH }}
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: .net-app
-          path: ${{env.DOTNET_ROOT}}/myapp
+          path: ${{ env.PUBLISH_PATH }}
 
   deploy:
     runs-on: windows-latest
@@ -47,8 +70,34 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: .net-app
-      
+          path: ${{ env.PUBLISH_PATH }}
+
+      # The App Service can be reached either with OIDC sign-in (azure/login, what the
+      # Azure portal wires up when it generates this workflow) or with a publish profile.
+      # Detect which set of repository secrets is actually configured and use that mode,
+      # instead of failing later with the unhelpful "No credentials found" error.
+      - name: Determine Azure deployment credentials
+        id: azure-creds
+        shell: bash
+        env:
+          OIDC_CLIENT_ID: ${{ secrets.AZUREAPPSERVICE_CLIENTID_2FE17286043545429548C02B28246EBA }}
+          PUBLISH_PROFILE: ${{ secrets.AZURE_PUBLISH_PROFILE }}
+          PUBLISH_PROFILE_FROM_AZURE: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_6032F94414B94A68BE645AB3C8817427 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OIDC_CLIENT_ID:-}" ]; then
+            echo "Signing in to Azure with OIDC (federated identity)."
+            echo "mode=oidc" >> "$GITHUB_OUTPUT"
+          elif [ -n "${PUBLISH_PROFILE:-}" ] || [ -n "${PUBLISH_PROFILE_FROM_AZURE:-}" ]; then
+            echo "Using a publish profile to deploy."
+            echo "mode=publish-profile" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Azure credentials found in the repository secrets."
+            echo "mode=missing" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Login to Azure
+        if: steps.azure-creds.outputs.mode == 'oidc'
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_2FE17286043545429548C02B28246EBA }}
@@ -57,9 +106,26 @@ jobs:
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
+        if: steps.azure-creds.outputs.mode == 'oidc'
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'neverbeen-api-kingshuk'
-          slot-name: 'Production'
-          package: .
-          
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          slot-name: ${{ env.AZURE_WEBAPP_SLOT }}
+          package: ${{ env.PUBLISH_PATH }}
+
+      - name: Deploy to Azure Web App (publish profile)
+        id: deploy-to-webapp-profile
+        if: steps.azure-creds.outputs.mode == 'publish-profile'
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          slot-name: ${{ env.AZURE_WEBAPP_SLOT }}
+          publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE || secrets.AZUREAPPSERVICE_PUBLISHPROFILE_6032F94414B94A68BE645AB3C8817427 }}
+          package: ${{ env.PUBLISH_PATH }}
+
+      - name: No Azure deployment credentials found
+        if: steps.azure-creds.outputs.mode == 'missing'
+        shell: bash
+        run: |
+          echo "::error title=Azure deployment credentials are missing::The build job succeeded, but no Azure credentials are configured. In GitHub -> Settings -> Secrets and variables -> Actions add EITHER the OIDC secrets AZUREAPPSERVICE_CLIENTID_2FE17286043545429548C02B28246EBA / AZUREAPPSERVICE_TENANTID_4C766DB85E374B5EA66B974E16181235 / AZUREAPPSERVICE_SUBSCRIPTIONID_426AC748D2464F31831C8A592D897344, OR a single AZURE_PUBLISH_PROFILE secret containing the App Service publish profile XML. Then re-run this workflow."
+          exit 1

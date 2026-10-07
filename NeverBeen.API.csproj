@@ -5,6 +5,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>neverbeen-api-local-development</UserSecretsId>
+
+    <!-- .NET 7 is out of support, so the shared runtime is no longer installed on
+         Azure App Service workers (their stacks are .NET 8 / .NET 9). Without this,
+         the published app fails to start there with HTTP 500.31 - "The framework
+         'Microsoft.NETCore.App', version '7.0.0' was not found".
+         RollForward=Major uses the lowest higher runtime the host provides
+         (.NET 7 if present, otherwise .NET 8, 9, ...). -->
+    <RollForward>Major</RollForward>
   </PropertyGroup>
 
   <ItemGroup>

@@ -17,6 +17,7 @@ on:
   push:
     branches:
       - 'main'
+      - 'arena/c929b43f-neverbeen-api'
   workflow_dispatch:
 
 env:

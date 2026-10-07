@@ -17,7 +17,7 @@ website, backed by **Supabase (PostgreSQL)**. It persists every community featur
 | Circles | Travel circles (owner/admins/members), archive, group chat |
 | Notifications | Companionship, likes, comments, follows, tags → unread badge |
 | Security | Login devices (block / remove), abuse reports, blocked users, hidden posts |
-| Lookups | Countries / cities (seeded at first start) + professions / genders |
+| Lookups | Countries / cities (reconciled with `Data/GeoSeedData.cs` on every start) + professions / genders |
 
 ## Solution layout
 
@@ -60,9 +60,9 @@ NeverBeen.API/
    (`Cors:AllowedOrigins` = `https://youneverbeen.kingshukbanu1987.workers.dev`) and
    the frontend OAuth callback (`OAuth:FrontendRedirectUri`). On first start the API
    creates all tables in Supabase's `public` schema (via `CreateTablesAsync` — not
-   `EnsureCreated`, which is a no-op on Supabase) and seeds countries/cities.
-   Startup requires a reachable database and will fail if schema creation or
-   seeding fails.
+   `EnsureCreated`, which is a no-op on Supabase) and brings the Countries/Cities
+   lookup tables in step with the seed. Startup requires a reachable database and will
+   fail if schema creation fails.
 3. Run from a terminal:
 
    ```bash
@@ -87,6 +87,19 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
 
 ## Notes
 
+- **Lookup data (`Countries` / `Cities`).** `DbInitializer.SyncLookupsAsync()` reconciles
+  the tables with `Data/GeoSeedData.cs` (184 countries, 1006 cities) on **every** start:
+  countries already stored keep their ids and gain missing cities, countries that are not
+  stored yet are added, and two city rows seeded under older names are renamed in place
+  (`Bangalore` → `Bengaluru`, `Frankfurt` → `Frankfurt am Main`). Rows are never deleted and
+  re-running adds nothing, so a database seeded from a shorter list — for example
+  `neverbeen-database/seed.sql`, which ships 10 countries — is completed automatically on the
+  next deploy instead of being left with only those 10. This matters because
+  `POST /api/registration` and `PUT /api/profile` validate the submitted pair against the
+  `Cities` row and answer *"The selected city does not belong to the selected country."*
+  for any city the table does not know. After a deploy, check it with
+  `GET /api/lookup/countries` (expect 184 entries) and
+  `GET /api/lookup/countries/1/cities` (expect the cities of Andorra).
 - Auth model: OAuth SSO issues a JWT (`POST /api/auth/oauth/login`); registration
   (`POST /api/registration`) fills the profile and flips `Users.Status`
   `Pending → Active`. Every `[Authorize]` endpoint expects `Authorization: Bearer <jwt>`.

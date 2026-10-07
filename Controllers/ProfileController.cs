@@ -87,6 +87,15 @@ public class ProfileController : ControllerBase
 
         if (!string.IsNullOrWhiteSpace(request.FullName))
             user.FullName = request.FullName.Trim();
+        // First name, last name and state are their own columns; an explicit value (or an
+        // explicit empty string, which clears the column) is applied, an omitted field
+        // keeps its current value.
+        if (request.FirstName != null)
+            user.FirstName = string.IsNullOrWhiteSpace(request.FirstName) ? null : request.FirstName.Trim();
+        if (request.LastName != null)
+            user.LastName = string.IsNullOrWhiteSpace(request.LastName) ? null : request.LastName.Trim();
+        if (request.State != null)
+            user.State = string.IsNullOrWhiteSpace(request.State) ? null : request.State.Trim();
         if (request.Gender != null)
             user.Gender = request.Gender;
         if (request.DateOfBirth.HasValue)

@@ -103,6 +103,15 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
 - Auth model: OAuth SSO issues a JWT (`POST /api/auth/oauth/login`); registration
   (`POST /api/registration`) fills the profile and flips `Users.Status`
   `Pending → Active`. Every `[Authorize]` endpoint expects `Authorization: Bearer <jwt>`.
+- **First name / last name / state.** `Users.FirstName`, `Users.LastName` and `Users.State`
+  are stored from the registration form: `POST /api/registration` accepts the extra
+  multipart fields `firstName`, `lastName` and `state` next to `fullName`, and
+  `GET /api/profile/me`, `GET /api/profile/{id}` and `PUT /api/profile` carry the same three
+  fields (the registration page posts them for every new member). A name part that is not
+  posted is split out of `fullName` ("Kingshuk Banu" → `Kingshuk` / `Banu`), so rows created
+  by an older client still fill the columns, and a profile whose `FirstName` / `LastName`
+  columns are empty is answered with the split of its full name. The OAuth login stores the
+  provider's `given_name` / `family_name` on the Pending row as well.
 - `Users.UniqueId` (20-digit profile URL id) is derived automatically by the
   database trigger (`8920153401` + zero-padded id).
 - Photos: either `bytea` columns (max 100 KB, validated in `Common/ImageValidation.cs`)

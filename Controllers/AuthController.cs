@@ -104,12 +104,24 @@ public class AuthController : ControllerBase
 
         if (isNewUser)
         {
+            // The provider gives the name parts separately (Google: given_name / family_name);
+            // they are stored in the Users.FirstName / Users.LastName columns already at
+            // sign-in, and fall back to splitting the full name when the provider omits them.
+            var fullName = string.IsNullOrWhiteSpace(external.FullName)
+                ? email.Split('@')[0]
+                : external.FullName.Trim();
+            var nameWords = fullName
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             user = new UserProfile
             {
                 Email = email,
-                FullName = string.IsNullOrWhiteSpace(external.FullName)
-                    ? email.Split('@')[0]
-                    : external.FullName.Trim(),
+                FullName = fullName,
+                FirstName = string.IsNullOrWhiteSpace(external.FirstName)
+                    ? (nameWords.Length > 0 ? nameWords[0] : null)
+                    : external.FirstName.Trim(),
+                LastName = string.IsNullOrWhiteSpace(external.LastName)
+                    ? (nameWords.Length > 1 ? string.Join(' ', nameWords.Skip(1)) : null)
+                    : external.LastName.Trim(),
                 ExternalProfilePictureUrl = external.PictureUrl,
                 Status = UserProfileStatus.Pending,
                 CreatedAtUtc = DateTime.UtcNow,

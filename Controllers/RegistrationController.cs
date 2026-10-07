@@ -95,6 +95,15 @@ public class RegistrationController : ControllerBase
 
         // ---- write the profile --------------------------------------------------------
         user.FullName = request.FullName.Trim();
+        // First name, last name and state are their own columns on the member row. The
+        // registration page posts them separately (firstName / lastName / state); when a
+        // client does not, the names are split out of the full name so
+        // Users.FirstName / Users.LastName are never left empty.
+        var (firstName, lastName) = ResolveNames(request.FirstName, request.LastName, user.FullName);
+        user.FirstName = firstName;
+        user.LastName = lastName;
+        if (!string.IsNullOrWhiteSpace(request.State))
+            user.State = request.State.Trim();
         user.Email = newEmail;
         user.Gender = request.Gender;
         user.DateOfBirth = request.DateOfBirth.Date;
@@ -116,6 +125,41 @@ public class RegistrationController : ControllerBase
 
         var fresh = await LoadFullUserAsync(userId, cancellationToken);
         return Ok(await BuildDtoAsync(fresh!, cancellationToken));
+    }
+
+    /// <summary>
+    /// The first / last name to store: the values the registration page posted when they
+    /// are present, otherwise what can be split out of the full name
+    /// ("Kingshuk Banu" → "Kingshuk" / "Banu"). This keeps the dedicated
+    /// Users.FirstName / Users.LastName columns filled by every client, including the
+    /// older builds that only post "fullName".
+    /// </summary>
+    private static (string? FirstName, string? LastName) ResolveNames(
+        string? firstName, string? lastName, string fullName)
+    {
+        var first = string.IsNullOrWhiteSpace(firstName) ? null : firstName.Trim();
+        var last = string.IsNullOrWhiteSpace(lastName) ? null : lastName.Trim();
+        if (first != null && last != null)
+            return (first, last);
+
+        var words = (fullName ?? string.Empty)
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (words.Length == 0)
+            return (first, last);
+
+        first ??= words[0];
+
+        if (last == null && first != null)
+        {
+            // Everything after the first name is the last name — with a multi-word first
+            // name the words of the full name are counted, so "Ana Maria Lopez" with
+            // FirstName "Ana Maria" stores "Lopez" and not a duplicate "Maria Lopez".
+            var firstWords = first.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
+            var rest = words.Skip(Math.Max(1, firstWords));
+            last = rest.Any() ? string.Join(' ', rest) : null;
+        }
+
+        return (first, last);
     }
 
     private async Task<UserProfile?> LoadFullUserAsync(int id, CancellationToken cancellationToken)

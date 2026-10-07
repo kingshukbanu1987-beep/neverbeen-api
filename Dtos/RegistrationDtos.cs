@@ -13,6 +13,27 @@ public class RegistrationRequest
     [System.ComponentModel.DataAnnotations.MaxLength(200)]
     public string FullName { get; set; } = string.Empty;
 
+    /// <summary>
+    /// First name as typed on the registration page, stored in its own column
+    /// (<see cref="Entities.UserProfile.FirstName"/>). When the client does not post it
+    /// (or posts it empty) the API splits <see cref="FullName"/> instead, so the column
+    /// is filled for every registration.
+    /// </summary>
+    [System.ComponentModel.DataAnnotations.MaxLength(100)]
+    public string? FirstName { get; set; }
+
+    /// <summary>
+    /// Last name / surname as typed on the registration page
+    /// (<see cref="Entities.UserProfile.LastName"/>), split out of
+    /// <see cref="FullName"/> when it is not posted.
+    /// </summary>
+    [System.ComponentModel.DataAnnotations.MaxLength(100)]
+    public string? LastName { get; set; }
+
+    /// <summary>State / province as typed on the registration page (Users.State).</summary>
+    [System.ComponentModel.DataAnnotations.MaxLength(100)]
+    public string? State { get; set; }
+
     /// <summary>Male / Female / Other.</summary>
     [System.ComponentModel.DataAnnotations.Required]
     [System.ComponentModel.DataAnnotations.MaxLength(20)]

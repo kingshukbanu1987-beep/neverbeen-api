@@ -8,3 +8,4 @@ obj/
 # Local overrides (keep credentials out of Git)
 appsettings.Local.json
 appsettings.*.local.json
+NeverBeen.API.patch

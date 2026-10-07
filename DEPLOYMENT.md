@@ -118,6 +118,38 @@ If the VPS is directly exposed (options 1–2), open the port you bound
 (443 for HTTPS / 5080 for the quick test) in *Windows Defender Firewall →
 Inbound Rules*, and in your cloud provider's security group if there is one.
 
+## Step 2 (alternative) — Deploy to Azure App Service with GitHub Actions
+
+Instead of the VPS you can run the API on the Azure App Service
+**`neverbeen-api-kingshuk`**, deployed automatically by
+[`.github/workflows/main_neverbeen-api-kingshuk.yml`](.github/workflows/main_neverbeen-api-kingshuk.yml)
+on every push to `main` (or manually via *Actions → Run workflow*).
+
+Two things about that workflow are easy to get wrong:
+
+1. **Every `dotnet` command must name the project.** The repository root contains both
+   `neverbeen-api.sln` and `NeverBeen.API.csproj`, so a bare `dotnet build` /
+   `dotnet publish` aborts the job with
+   `MSBUILD : error MSB1011: Specify which project or solution file to use because this
+   folder contains more than one project or solution file.` The workflow passes
+   `NeverBeen.API.csproj` (`${{ env.PROJECT_PATH }}`) to `restore`, `build` and `publish`.
+2. **Deployment credentials.** The deploy job checks which repository secrets exist and
+   picks that mode, so you only need **one** of these
+   (GitHub → *Settings → Secrets and variables → Actions*):
+   - **OIDC / federated identity** (what the Azure portal wires up when it generates the
+     workflow): `AZUREAPPSERVICE_CLIENTID_…`, `AZUREAPPSERVICE_TENANTID_…`,
+     `AZUREAPPSERVICE_SUBSCRIPTIONID_…`
+   - **Publish profile** (a single secret): `AZURE_PUBLISH_PROFILE` — download it from
+     the App Service → *Overview → Download publish profile* and paste the XML.
+   If neither exists, the deploy job stops with a message naming the missing secret
+   (previously it failed with azure/webapps-deploy's `No credentials found`).
+
+**Runtime note:** the project targets `net7.0` and .NET 7 is out of support, so the shared
+framework is no longer installed on App Service workers. `NeverBeen.API.csproj` therefore
+sets `RollForward=Major`, which lets the published app start on the newer runtime of the
+App Service stack (set *Configuration → General settings → Stack* to **.NET 8**). Upgrading
+the project to `net8.0` is the recommended long-term fix.
+
 ## Step 3 — Point the Angular website at the API
 
 1. In your **Angular repo** set the API base URL (typically
@@ -184,3 +216,6 @@ If you skip OAuth, everything else still works.
 | Browser blocks requests ("mixed content") | The API is on `http://` while the site is `https://` — finish Step 2.4 |
 | OAuth error `redirect_uri_mismatch` | Provider console has a different/older redirect URI — use exactly `https://youneverbeen.kingshukbanu1987.workers.dev/auth/callback` |
 | 401 Unauthorized from API calls | Angular is not sending `Authorization: Bearer <token>`, or `Jwt:SigningKey` differs between the running API and `appsettings.json` |
+| GitHub Actions build: `MSBUILD : error MSB1011` | A `dotnet build`/`publish` command is missing the project/solution argument — the repo root has both. Use `NeverBeen.API.csproj` (see Step 2 alternative) |
+| GitHub Actions deploy: `No credentials found` | No Azure secret is configured. Add the OIDC secrets or `AZURE_PUBLISH_PROFILE` (see Step 2 alternative) |
+| Azure app returns `HTTP Error 500.31` / "framework was not found" | The App Service stack has no .NET 7 runtime. Keep `RollForward=Major` in `NeverBeen.API.csproj` and set the stack to .NET 8 |

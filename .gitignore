@@ -9,3 +9,6 @@ obj/
 appsettings.Local.json
 appsettings.*.local.json
 NeverBeen.API.patch
+
+# Published output (also produced by the GitHub Actions workflow)
+publish/

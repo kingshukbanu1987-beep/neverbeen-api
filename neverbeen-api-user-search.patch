@@ -1,0 +1,453 @@
+From c0828dca45aaed94a1bebfd5743fca200673afbc Mon Sep 17 00:00:00 2001
+From: kingshukbanu1987-beep
+ <329612224+kingshukbanu1987-beep@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 02:25:55 +0000
+Subject: [PATCH] Add the member directory: user search and public profiles
+
+The website's community search box could only search the companions a
+signed-in member already has (GET /api/companions), so typing a name
+never found anybody new - and a profile URL (/profile?id=<20-digit uid>)
+that was not a companion already could not be resolved at all. The guest
+tour, which carries a seeded directory of every traveler, finds and opens
+anybody. This is the API side of that parity:
+
+* GET /api/users/search?query=&limit= - finds Active members by first /
+  last / full name (and city, country, profession), name hits ranked
+  first. The signed-in member, members who switched off their search
+  visibility and members blocked in either direction are never returned.
+  Every hit answers its companionship status, isFollowing and mutual
+  companions count, so the search drop-down can offer Connect / Request
+  Sent / Connected and Follow / Following straight away.
+
+* GET /api/users/{id} and GET /api/users/uid/{uniqueId} - any member's
+  public profile as the same CompanionDto the companions endpoints answer
+  (relationship status, mutuals, About-me JSON, cover URL), so the
+  website can open a stranger's profile exactly like the guest tour.
+  Privacy: a non-public profile answers 403; WhoCanVisitProfile
+  (companions / none) trims the answer to the identity cards of a locked
+  profile; a locked profile hides its About-me content from
+  non-companions; Pending accounts are never answered to other members.
+
+* CompanionDto gains IsFollowing, answered by the companions endpoints as
+  well, so the website's follow buttons agree with the database.
+
+README documents the directory endpoints.
+---
+ Controllers/CompanionsController.cs |   7 +-
+ Controllers/UsersController.cs      | 293 ++++++++++++++++++++++++++++
+ Dtos/CompanionDtos.cs               |  33 ++++
+ README.md                           |  21 ++
+ 4 files changed, 353 insertions(+), 1 deletion(-)
+ create mode 100644 Controllers/UsersController.cs
+
+diff --git a/Controllers/CompanionsController.cs b/Controllers/CompanionsController.cs
+index e99e587..4d8932c 100644
+--- a/Controllers/CompanionsController.cs
++++ b/Controllers/CompanionsController.cs
+@@ -249,6 +249,8 @@ public class CompanionsController : ControllerBase
+         var mine = await ConnectedCompanionIds(myId, cancellationToken);
+         var theirs = await ConnectedCompanionIds(user.Id, cancellationToken);
+         var mutuals = mine.Intersect(theirs).Count();
++        var isFollowing = await _db.Follows.AsNoTracking()
++            .AnyAsync(f => f.FollowerId == myId && f.FolloweeId == user.Id, cancellationToken);
+ 
+         return new CompanionDto
+         {
+@@ -258,7 +260,9 @@ public class CompanionsController : ControllerBase
+             ProfilePhotoUrl = user.ProfilePhotoData != null
+                 ? $"/api/profile/{user.Id}/photo"
+                 : user.ProfilePhotoUrl ?? user.ExternalProfilePictureUrl ?? string.Empty,
+-            CoverPhotoUrl = user.CoverPhotoUrl,
++            CoverPhotoUrl = user.CoverPhotoData != null
++                ? $"/api/profile/{user.Id}/cover"
++                : user.CoverPhotoUrl,
+             Country = user.Country?.Name ?? string.Empty,
+             City = user.City?.Name ?? string.Empty,
+             Profession = user.Profession ?? string.Empty,
+@@ -272,6 +276,7 @@ public class CompanionsController : ControllerBase
+             ActiveStatus = user.ActiveStatus,
+             CustomStatusText = user.CustomStatusText,
+             IsVerified = user.IsVerified,
++            IsFollowing = isFollowing,
+             ConnectedCompanionIds = theirs
+         };
+     }
+diff --git a/Controllers/UsersController.cs b/Controllers/UsersController.cs
+new file mode 100644
+index 0000000..18d587c
+--- /dev/null
++++ b/Controllers/UsersController.cs
+@@ -0,0 +1,293 @@
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.EntityFrameworkCore;
++using NeverBeen.API.Common;
++using NeverBeen.API.Data;
++using NeverBeen.API.Dtos;
++using NeverBeen.API.Entities;
++
++namespace NeverBeen.API.Controllers;
++
++/// <summary>
++/// The member directory: name search for the community search box and the public
++/// profile of any member (by numeric id or by the 20-digit unique id used in
++/// profile URLs, e.g. /profile?id=89201534010000000007).
++/// </summary>
++[Route("api/users")]
++[ApiController]
++[Authorize]
++public class UsersController : ControllerBase
++{
++    private readonly AppDbContext _db;
++
++    public UsersController(AppDbContext db)
++    {
++        _db = db;
++    }
++
++    /// <summary>
++    /// Searches Active members by name (first, last or full name); city, country and
++    /// profession match too so the community search box works like the guest tour's.
++    /// Hidden members: the signed-in member themself, members who switched off their
++    /// search visibility (UserSettings.SearchVisibility) and members blocked in either
++    /// direction. Name hits are ranked before city / country / profession hits.
++    /// </summary>
++    [HttpGet("search")]
++    public async Task<ActionResult<List<UserSearchResultDto>>> Search(
++        [FromQuery] string? query,
++        [FromQuery] int limit = 20,
++        CancellationToken cancellationToken = default)
++    {
++        var myId = User.GetUserId();
++        var needle = (query ?? string.Empty).Trim();
++        if (needle.Length == 0)
++            return Ok(new List<UserSearchResultDto>());
++        if (needle.Length > 100)
++            needle = needle[..100];
++        if (limit < 1) limit = 1;
++        if (limit > 50) limit = 50;
++
++        var pattern = $"%{needle}%";
++
++        // Blocked travelers are invisible to each other everywhere in the community —
++        // including search (same rule as the Journey feed and the companions list).
++        var blockedIds = await BlockedIds(myId, cancellationToken);
++
++        var candidates = await _db.Users.AsNoTracking()
++            .Include(u => u.Country)
++            .Include(u => u.City)
++            .Include(u => u.Settings)
++            .Where(u => u.Status == UserProfileStatus.Active && u.Id != myId)
++            .Where(u => !blockedIds.Contains(u.Id))
++            .Where(u => u.Settings == null || u.Settings.SearchVisibility)
++            .Where(u =>
++                EF.Functions.ILike(u.FullName ?? string.Empty, pattern) ||
++                EF.Functions.ILike(u.FirstName ?? string.Empty, pattern) ||
++                EF.Functions.ILike(u.LastName ?? string.Empty, pattern) ||
++                (u.City != null && EF.Functions.ILike(u.City.Name, pattern)) ||
++                (u.Country != null && EF.Functions.ILike(u.Country.Name, pattern)) ||
++                EF.Functions.ILike(u.Profession ?? string.Empty, pattern))
++            .OrderBy(u => u.Id)
++            .Take(limit * 3)
++            .ToListAsync(cancellationToken);
++
++        // Name hits first (that is what the search box types), then everything else.
++        var nameHits = candidates
++            .Where(u => Matches(u.FullName, needle) || Matches(u.FirstName, needle) || Matches(u.LastName, needle))
++            .ToList();
++        var otherHits = candidates.Except(nameHits).ToList();
++        var ranked = nameHits.Concat(otherHits).Take(limit).ToList();
++        if (ranked.Count == 0)
++            return Ok(new List<UserSearchResultDto>());
++
++        var rankedIds = ranked.Select(u => u.Id).ToList();
++
++        // Relationship of the signed-in member to every hit — one query each.
++        var pairs = await _db.Companionships.AsNoTracking()
++            .Where(c => (c.UserId == myId && rankedIds.Contains(c.CompanionId)) ||
++                        (c.CompanionId == myId && rankedIds.Contains(c.UserId)))
++            .ToListAsync(cancellationToken);
++        var follows = await _db.Follows.AsNoTracking()
++            .Where(f => f.FollowerId == myId && rankedIds.Contains(f.FolloweeId))
++            .Select(f => f.FolloweeId)
++            .ToListAsync(cancellationToken);
++
++        // Mutual companions: my connected ids intersected with each hit's connected ids.
++        var mine = await ConnectedCompanionIds(myId, cancellationToken);
++        var theirRows = await _db.Companionships.AsNoTracking()
++            .Where(c => c.Status == CompanionshipStatus.Connected &&
++                        (rankedIds.Contains(c.UserId) || rankedIds.Contains(c.CompanionId)))
++            .ToListAsync(cancellationToken);
++        var theirs = rankedIds.ToDictionary(
++            id => id,
++            id => theirRows
++                .Where(c => c.UserId == id || c.CompanionId == id)
++                .Select(c => c.UserId == id ? c.CompanionId : c.UserId)
++                .ToHashSet());
++
++        var result = new List<UserSearchResultDto>();
++        foreach (var user in ranked)
++        {
++            var row = pairs.FirstOrDefault(c =>
++                (c.UserId == myId && c.CompanionId == user.Id) ||
++                (c.CompanionId == myId && c.UserId == user.Id));
++
++            result.Add(new UserSearchResultDto
++            {
++                Id = user.Id,
++                UniqueId = user.UniqueId ?? UserProfileStatus.GenerateUniqueId(user.Id),
++                FullName = user.FullName ?? string.Empty,
++                ProfilePhotoUrl = user.ProfilePhotoData != null
++                    ? $"/api/profile/{user.Id}/photo"
++                    : user.ProfilePhotoUrl ?? user.ExternalProfilePictureUrl ?? string.Empty,
++                Country = user.Country?.Name ?? string.Empty,
++                City = user.City?.Name ?? string.Empty,
++                Profession = user.Profession,
++                IsOnline = user.ActiveStatus == "Active",
++                ActiveStatus = user.ActiveStatus,
++                IsVerified = user.IsVerified,
++                IsProfileLocked = user.IsProfileLocked,
++                Status = row == null ? "none" : RelativeStatus(row, myId),
++                IsFollowing = follows.Contains(user.Id),
++                MutualCompanionsCount = mine.Count(id => theirs[user.Id].Contains(id))
++            });
++        }
++        return Ok(result);
++    }
++
++    /// <summary>
++    /// One member as seen by the signed-in member — the same CompanionDto the
++    /// companions endpoints answer (relationship status, mutuals, About-me JSON), so
++    /// the website can open any profile exactly like the guest tour does. Privacy:
++    /// members who switched off their public profile answer 403; a profile that may
++    /// not be visited (WhoCanVisitProfile) answers only its identity cards; a locked
++    /// profile hides its About-me content from non-companions.
++    /// </summary>
++    [HttpGet("{userId:int}")]
++    public async Task<ActionResult<CompanionDto>> Get(int userId, CancellationToken cancellationToken)
++    {
++        var myId = User.GetUserId();
++        var user = await _db.Users.AsNoTracking()
++            .Include(u => u.Country).Include(u => u.City).Include(u => u.Settings)
++            .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
++
++        // Pending (not yet registered) accounts are invisible to everybody else.
++        if (user == null || (user.Status != UserProfileStatus.Active && user.Id != myId))
++            return NotFound();
++
++        if (userId != myId && user.Settings?.PublicProfileEnabled == false)
++            return Forbid();
++
++        var dto = await ToCompanionDto(user, myId, cancellationToken);
++        return Ok(await ApplyVisitRulesAsync(dto, user, myId, cancellationToken));
++    }
++
++    /// <summary>Resolves the 20-digit public profile id used in profile URLs.</summary>
++    [HttpGet("uid/{uniqueId:length(20)}")]
++    public async Task<ActionResult<CompanionDto>> GetByUniqueId(string uniqueId, CancellationToken cancellationToken)
++    {
++        var myId = User.GetUserId();
++        var user = await _db.Users.AsNoTracking()
++            .Include(u => u.Country).Include(u => u.City).Include(u => u.Settings)
++            .FirstOrDefaultAsync(u => u.UniqueId == uniqueId, cancellationToken);
++
++        // A unique id nobody carries belongs to nobody — same answer as an unknown id.
++        if (user == null || (user.Status != UserProfileStatus.Active && user.Id != myId))
++            return NotFound();
++
++        if (user.Id != myId && user.Settings?.PublicProfileEnabled == false)
++            return Forbid();
++
++        var dto = await ToCompanionDto(user, myId, cancellationToken);
++        return Ok(await ApplyVisitRulesAsync(dto, user, myId, cancellationToken));
++    }
++
++    // ------------------------------------------------------------------ helpers
++
++    /// <summary>Applies WhoCanVisitProfile and the profile lock to a visitor's view.</summary>
++    private async Task<CompanionDto> ApplyVisitRulesAsync(
++        CompanionDto dto, UserProfile user, int myId, CancellationToken cancellationToken)
++    {
++        if (user.Id == myId)
++            return dto;
++
++        var connected = dto.Status == "connected";
++        var rule = user.Settings?.WhoCanVisitProfile ?? "everyone";
++        if (rule == "none" || (rule == "companions" && !connected))
++        {
++            // Not allowed to visit: identity cards only, presented as a locked profile —
++            // the website renders its locked shield with the companionship actions.
++            return new CompanionDto
++            {
++                Id = dto.Id,
++                UniqueId = dto.UniqueId,
++                FullName = dto.FullName,
++                ProfilePhotoUrl = dto.ProfilePhotoUrl,
++                Country = dto.Country,
++                City = dto.City,
++                Profession = dto.Profession,
++                IsOnline = dto.IsOnline,
++                Status = dto.Status,
++                IsFollowing = dto.IsFollowing,
++                IsVerified = dto.IsVerified,
++                IsProfileLocked = true
++            };
++        }
++
++        if (user.IsProfileLocked && !connected)
++        {
++            // Locked for non-companions: the About-me story stays private.
++            dto.Bio = null;
++            dto.AboutMe = null;
++            dto.AboutMeDetailsJson = null;
++        }
++        return dto;
++    }
++
++    private async Task<CompanionDto> ToCompanionDto(UserProfile user, int myId, CancellationToken cancellationToken)
++    {
++        var row = await FindPair(myId, user.Id, cancellationToken);
++        var mine = await ConnectedCompanionIds(myId, cancellationToken);
++        var theirs = await ConnectedCompanionIds(user.Id, cancellationToken);
++        var isFollowing = await _db.Follows.AsNoTracking()
++            .AnyAsync(f => f.FollowerId == myId && f.FolloweeId == user.Id, cancellationToken);
++
++        return new CompanionDto
++        {
++            Id = user.Id,
++            UniqueId = user.UniqueId ?? UserProfileStatus.GenerateUniqueId(user.Id),
++            FullName = user.FullName ?? string.Empty,
++            ProfilePhotoUrl = user.ProfilePhotoData != null
++                ? $"/api/profile/{user.Id}/photo"
++                : user.ProfilePhotoUrl ?? user.ExternalProfilePictureUrl ?? string.Empty,
++            CoverPhotoUrl = user.CoverPhotoData != null
++                ? $"/api/profile/{user.Id}/cover"
++                : user.CoverPhotoUrl,
++            Country = user.Country?.Name ?? string.Empty,
++            City = user.City?.Name ?? string.Empty,
++            Profession = user.Profession ?? string.Empty,
++            IsOnline = user.ActiveStatus == "Active",
++            MutualCompanionsCount = mine.Intersect(theirs).Count(),
++            Status = row == null ? "none" : RelativeStatus(row, myId),
++            Bio = user.AboutMe,
++            AboutMe = user.AboutMe,
++            AboutMeDetailsJson = user.AboutMeDetailsJson,
++            IsProfileLocked = user.IsProfileLocked,
++            ActiveStatus = user.ActiveStatus,
++            CustomStatusText = user.CustomStatusText,
++            IsVerified = user.IsVerified,
++            IsFollowing = isFollowing,
++            ConnectedCompanionIds = theirs
++        };
++    }
++
++    private static bool Matches(string? value, string needle)
++        => !string.IsNullOrWhiteSpace(value) &&
++           value.Contains(needle, StringComparison.OrdinalIgnoreCase);
++
++    private static string RelativeStatus(Companionship row, int myId)
++    {
++        if (row.Status == CompanionshipStatus.Connected)
++            return "connected";
++        return row.RequesterId == myId ? "pending_outgoing" : "pending_incoming";
++    }
++
++    private async Task<Companionship?> FindPair(int x, int y, CancellationToken cancellationToken)
++    {
++        var (a, b) = x < y ? (x, y) : (y, x);
++        return await _db.Companionships.AsNoTracking()
++            .FirstOrDefaultAsync(c => c.UserId == a && c.CompanionId == b, cancellationToken);
++    }
++
++    private async Task<List<int>> ConnectedCompanionIds(int userId, CancellationToken cancellationToken)
++        => await _db.Companionships.AsNoTracking()
++            .Where(c => c.Status == CompanionshipStatus.Connected && (c.UserId == userId || c.CompanionId == userId))
++            .Select(c => c.UserId == userId ? c.CompanionId : c.UserId)
++            .ToListAsync(cancellationToken);
++
++    private async Task<List<int>> BlockedIds(int userId, CancellationToken cancellationToken)
++        => await _db.BlockedUsers.AsNoTracking()
++            .Where(b => b.UserId == userId || b.BlockedUserId == userId)
++            .Select(b => b.UserId == userId ? b.BlockedUserId : b.UserId)
++            .ToListAsync(cancellationToken);
++}
+diff --git a/Dtos/CompanionDtos.cs b/Dtos/CompanionDtos.cs
+index 149429c..efa9376 100644
+--- a/Dtos/CompanionDtos.cs
++++ b/Dtos/CompanionDtos.cs
+@@ -26,10 +26,43 @@ public class CompanionDto
+     public string? ActiveStatus { get; set; }
+     public string? CustomStatusText { get; set; }
+     public bool IsVerified { get; set; }
++
++    /// <summary>True when the requesting member already follows this traveler.</summary>
++    public bool IsFollowing { get; set; }
++
+     public string? RelationshipStatus { get; set; }
+     public List<int>? ConnectedCompanionIds { get; set; }
+ }
+ 
++/// <summary>
++/// One hit of the community member search (<c>GET /api/users/search</c>): the identity
++/// cards of the result plus its relationship to the signed-in member, so the search
++/// drop-down can show Connect / Request Sent / Connected and Follow / Following
++/// without a second round trip.
++/// </summary>
++public class UserSearchResultDto
++{
++    public int Id { get; set; }
++    public string UniqueId { get; set; } = string.Empty;
++    public string FullName { get; set; } = string.Empty;
++    public string ProfilePhotoUrl { get; set; } = string.Empty;
++    public string Country { get; set; } = string.Empty;
++    public string City { get; set; } = string.Empty;
++    public string? Profession { get; set; }
++    public bool IsOnline { get; set; }
++    public string? ActiveStatus { get; set; }
++    public bool IsVerified { get; set; }
++    public bool IsProfileLocked { get; set; }
++
++    /// <summary>Companionship with the signed-in member: "connected", "pending_outgoing", "pending_incoming" or "none".</summary>
++    public string Status { get; set; } = "none";
++
++    /// <summary>True when the signed-in member already follows this traveler.</summary>
++    public bool IsFollowing { get; set; }
++
++    public int MutualCompanionsCount { get; set; }
++}
++
+ /// <summary>A follower / following entry.</summary>
+ public class FollowDto
+ {
+diff --git a/README.md b/README.md
+index adedb80..04179f5 100644
+--- a/README.md
++++ b/README.md
+@@ -138,3 +138,24 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
+     created post carries its tagged companions without extra round trips.
+   - `POST /api/messagebook` accepts `imageUrl` and `CommentDto` answers it, so message
+     book entries with an attached photograph are stored and re-served.
++- **Member directory — search and public profiles (`UsersController`).** The community
++  search box must find *any* member, not only the companions a signed-in traveler
++  already has, and a profile URL (`/profile?id=<20-digit uid>`) must open the real
++  profile of the member it points at. Three endpoints close that gap:
++  - `GET /api/users/search?query=&limit=` matches Active members by first / last / full
++    name (and city, country, profession), ranking name hits first. The signed-in member,
++    members who switched off `UserSettings.SearchVisibility` and members blocked in
++    either direction are never returned. Each hit carries its companionship `status`,
++    `isFollowing` and `mutualCompanionsCount`, so the search drop-down can offer
++    Connect / Request Sent / Connected and Follow / Following directly.
++  - `GET /api/users/{id}` and `GET /api/users/uid/{uniqueId}` answer the same
++    `CompanionDto` the companions endpoints use (relationship status, mutuals, About-me
++    JSON, cover URL), so the website opens any member's profile exactly like the guest
++    tour does. Privacy: a non-public profile answers 403; `WhoCanVisitProfile`
++    ("companions" / "none") trims the answer to the identity cards of a locked profile;
++    a locked profile hides its About-me content from non-companions. Pending (not yet
++    registered) accounts are never answered to other members.
++  - `CompanionDto.IsFollowing` is now answered by the companions endpoints too, so the
++    website's follow buttons agree with the database.
++  - Name search is fast on big member tables with the trigram indexes of
++    `neverbeen-database-user-search.patch` (optional — ILIKE works without them).
+-- 
+2.39.5
+

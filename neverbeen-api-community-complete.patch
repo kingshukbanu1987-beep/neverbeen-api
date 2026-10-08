@@ -1,0 +1,428 @@
+From 9e4278bbaa7edd2078f20afc8cfed93d7d27899a Mon Sep 17 00:00:00 2001
+From: kingshukbanu1987-beep
+ <329612224+kingshukbanu1987-beep@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 19:51:17 +0000
+Subject: [PATCH] Complete the community endpoints the website integrates
+ against
+
+The NeverBeen website's community pages (companions, circles, journey feed,
+message book, chats, notifications, gallery, followers/following, settings,
+about me, devices, moderation) now read and write every dataset through this
+API, and five gaps remained that left the website working against stale or
+invented data:
+
+* About me sub-sections: PUT /api/profile accepts aboutMeDetailsJson and
+  ProfileDto answers it (Users.AboutMeDetailsJson), so the structured
+  About-me editor (intro, work, education, hobbies, per-field visibility)
+  survives a sign-in on another browser instead of living only in the
+  website's localStorage.
+
+* Presence: PUT /api/profile accepts activeStatus (validated against
+  Active / Busy / Don't Disturb / Away / Inactive / Custom) and
+  customStatusText; ProfileDto carries the stored columns, so the presence
+  picker and the companions' online states come from the database.
+
+* Cover photo: PUT/DELETE /api/profile/cover upload and remove
+  Users.CoverPhotoData (validated like the profile photo) and
+  GET /api/profile/{id}/cover serves it; ProfileDto.CoverPhotoUrl points at
+  the stored bytes. The website could only keep cover photos as data URLs.
+
+* Blue-tick verification: PUT /api/profile/settings persists isVerified,
+  verificationEmail and verificationType onto the member row and mirrors
+  them into the settings section, so verification survives a new browser.
+
+* Journey tags: POST /api/journey and PUT /api/journey/{id} accept
+  taggedCompanionIds - create adds them, update replaces the tag set - so a
+  freshly created post carries its tagged companions without one POST per
+  tag afterwards.
+
+* Message book photographs: POST /api/messagebook accepts imageUrl and
+  CommentDto answers it, so entries posted with a picture show it after a
+  reload.
+
+README documents the complete integration surface.
+---
+ Common/AppConstants.cs               |  6 ++
+ Controllers/JourneyController.cs     | 52 +++++++++++++++
+ Controllers/MessageBookController.cs |  1 +
+ Controllers/ProfileController.cs     | 98 ++++++++++++++++++++++++++++
+ Dtos/JourneyDtos.cs                  |  3 +
+ Dtos/Mappers.cs                      |  7 ++
+ Dtos/MessageBookDtos.cs              |  7 ++
+ Dtos/ProfileDtos.cs                  | 27 ++++++++
+ README.md                            | 19 ++++++
+ 9 files changed, 220 insertions(+)
+
+diff --git a/Common/AppConstants.cs b/Common/AppConstants.cs
+index 17cbb78..ba787b5 100644
+--- a/Common/AppConstants.cs
++++ b/Common/AppConstants.cs
+@@ -30,6 +30,12 @@ public static class AppConstants
+         "light", "dark", "system"
+     };
+ 
++    /// <summary>Presence values stored on the member row (Users.ActiveStatus).</summary>
++    public static readonly string[] ActiveStatuses =
++    {
++        "Active", "Busy", "Don't Disturb", "Away", "Inactive", "Custom"
++    };
++
+     public const int MaxProfilePhotoBytes = 5 * 1024 * 1024;   // 5 MB
+     public const int MaxGalleryPhotoBytes = 8 * 1024 * 1024;   // 8 MB
+ 
+diff --git a/Controllers/JourneyController.cs b/Controllers/JourneyController.cs
+index 58e348f..cf07827 100644
+--- a/Controllers/JourneyController.cs
++++ b/Controllers/JourneyController.cs
+@@ -131,6 +131,7 @@ public class JourneyController : ControllerBase
+         await _db.SaveChangesAsync(cancellationToken);
+ 
+         await SaveAudience(post.Id, request.Audience, cancellationToken);
++        await ApplyTags(post.Id, request.TaggedCompanionIds, replace: false, cancellationToken);
+         if (request.OriginalPostId.HasValue)
+         {
+             var original = await _db.JourneyPosts.FindAsync(new object?[] { request.OriginalPostId.Value }, cancellationToken);
+@@ -167,6 +168,8 @@ public class JourneyController : ControllerBase
+         await _db.SaveChangesAsync(cancellationToken);
+ 
+         await SaveAudience(post.Id, request.Audience, cancellationToken);
++        if (request.TaggedCompanionIds != null)
++            await ApplyTags(post.Id, request.TaggedCompanionIds, replace: true, cancellationToken);
+ 
+         var dto = (await BuildPostDtos(new List<JourneyPost> { post }, myId, cancellationToken, includeComments: true)).First();
+         return Ok(dto);
+@@ -441,6 +444,55 @@ public class JourneyController : ControllerBase
+         return NoContent();
+     }
+ 
++    /// <summary>
++    /// Applies the tagged companions of a post. With <paramref name="replace"/> the
++    /// stored tag set is replaced (edit), otherwise ids are added that are not tagged
++    /// yet (create). Tagging yourself is allowed; unknown ids are ignored.
++    /// </summary>
++    private async Task ApplyTags(long postId, List<int>? userIds, bool replace, CancellationToken cancellationToken)
++    {
++        if (userIds == null || userIds.Count == 0)
++        {
++            if (replace)
++            {
++                var stale = await _db.JourneyPostTags.Where(t => t.PostId == postId).ToListAsync(cancellationToken);
++                if (stale.Count > 0)
++                {
++                    _db.JourneyPostTags.RemoveRange(stale);
++                    await _db.SaveChangesAsync(cancellationToken);
++                }
++            }
++            return;
++        }
++
++        var knownIds = (await _db.Users.AsNoTracking()
++            .Where(u => userIds.Contains(u.Id))
++            .Select(u => u.Id)
++            .ToListAsync(cancellationToken)).ToHashSet();
++
++        var existing = await _db.JourneyPostTags
++            .Where(t => t.PostId == postId)
++            .ToListAsync(cancellationToken);
++
++        if (replace)
++        {
++            var keep = existing.Where(t => knownIds.Contains(t.UserId) && userIds.Contains(t.UserId)).ToList();
++            var dropped = existing.Except(keep).ToList();
++            if (dropped.Count > 0)
++                _db.JourneyPostTags.RemoveRange(dropped);
++            existing = keep;
++        }
++
++        foreach (var userId in userIds)
++        {
++            if (!knownIds.Contains(userId) || existing.Any(t => t.UserId == userId))
++                continue;
++            _db.JourneyPostTags.Add(new JourneyPostTag { PostId = postId, UserId = userId });
++        }
++
++        await _db.SaveChangesAsync(cancellationToken);
++    }
++
+     // ------------------------------------------------------------------ helpers
+ 
+     private async Task SaveAudience(long postId, PostAudienceDto? audience, CancellationToken cancellationToken)
+diff --git a/Controllers/MessageBookController.cs b/Controllers/MessageBookController.cs
+index 544e05a..7b05141 100644
+--- a/Controllers/MessageBookController.cs
++++ b/Controllers/MessageBookController.cs
+@@ -147,6 +147,7 @@ public class MessageBookController : ControllerBase
+             Text = request.Text.Trim(),
+             AuthorId = userId,
+             ParentId = request.ParentId,
++            ImageUrl = string.IsNullOrWhiteSpace(request.ImageUrl) ? null : request.ImageUrl.Trim(),
+             CreatedAtUtc = DateTime.UtcNow
+         };
+         _db.CommunityComments.Add(comment);
+diff --git a/Controllers/ProfileController.cs b/Controllers/ProfileController.cs
+index 1e0ef38..b5a08a2 100644
+--- a/Controllers/ProfileController.cs
++++ b/Controllers/ProfileController.cs
+@@ -85,6 +85,9 @@ public class ProfileController : ControllerBase
+                 return BadRequest(new { error = "The selected city does not belong to the selected country." });
+         }
+ 
++        if (request.ActiveStatus != null && !AppConstants.ActiveStatuses.Contains(request.ActiveStatus, StringComparer.OrdinalIgnoreCase))
++            return BadRequest(new { error = $"Active status must be one of: {string.Join(", ", AppConstants.ActiveStatuses)}." });
++
+         if (!string.IsNullOrWhiteSpace(request.FullName))
+             user.FullName = request.FullName.Trim();
+         // First name, last name and state are their own columns; an explicit value (or an
+@@ -114,6 +117,22 @@ public class ProfileController : ControllerBase
+             user.AboutMe = request.AboutMe.Trim();
+         if (request.Profession != null)
+             user.Profession = request.Profession;
++        // Structured About me sub-sections (stored verbatim as JSON) and the presence
++        // columns: an explicit value (an empty string clears) is applied, an omitted
++        // field keeps its current value.
++        if (request.AboutMeDetailsJson != null)
++            user.AboutMeDetailsJson = string.IsNullOrWhiteSpace(request.AboutMeDetailsJson)
++                ? null
++                : request.AboutMeDetailsJson.Trim();
++        if (request.ActiveStatus != null)
++            user.ActiveStatus = string.IsNullOrWhiteSpace(request.ActiveStatus)
++                ? "Active"
++                : AppConstants.ActiveStatuses.First(a =>
++                    string.Equals(a, request.ActiveStatus.Trim(), StringComparison.OrdinalIgnoreCase));
++        if (request.CustomStatusText != null)
++            user.CustomStatusText = string.IsNullOrWhiteSpace(request.CustomStatusText)
++                ? null
++                : request.CustomStatusText.Trim();
+ 
+         user.UpdatedAtUtc = DateTime.UtcNow;
+         await _db.SaveChangesAsync(cancellationToken);
+@@ -122,6 +141,67 @@ public class ProfileController : ControllerBase
+         return Ok(await BuildDtoAsync(updated!, cancellationToken));
+     }
+ 
++    /// <summary>Uploads a new cover photograph (multipart, field name "photo").</summary>
++    [Authorize]
++    [HttpPut("cover")]
++    [Consumes("multipart/form-data")]
++    public async Task<ActionResult<ProfileDto>> UploadCover([FromForm] IFormFile photo, CancellationToken cancellationToken)
++    {
++        var user = await _db.Users
++            .FirstOrDefaultAsync(u => u.Id == User.GetUserId(), cancellationToken);
++        if (user == null)
++            return NotFound();
++
++        var error = ImageValidation.ValidateRequired(photo, AppConstants.MaxProfilePhotoBytes);
++        if (error != null)
++            return BadRequest(new { error });
++
++        using var memory = new MemoryStream();
++        await photo.CopyToAsync(memory, cancellationToken);
++        user.CoverPhotoData = memory.ToArray();
++        user.CoverPhotoMimeType = photo.ContentType ?? "image/jpeg";
++        user.UpdatedAtUtc = DateTime.UtcNow;
++        await _db.SaveChangesAsync(cancellationToken);
++
++        var updated = await LoadFullUserAsync(user.Id, cancellationToken);
++        return Ok(await BuildDtoAsync(updated!, cancellationToken));
++    }
++
++    /// <summary>Removes the uploaded cover photograph.</summary>
++    [Authorize]
++    [HttpDelete("cover")]
++    public async Task<IActionResult> DeleteCover(CancellationToken cancellationToken)
++    {
++        var user = await _db.Users
++            .FirstOrDefaultAsync(u => u.Id == User.GetUserId(), cancellationToken);
++        if (user == null)
++            return NotFound();
++
++        user.CoverPhotoData = null;
++        user.CoverPhotoMimeType = null;
++        user.UpdatedAtUtc = DateTime.UtcNow;
++        await _db.SaveChangesAsync(cancellationToken);
++        return NoContent();
++    }
++
++    /// <summary>Serves the cover photograph as an image (used by &lt;img&gt; tags across the app).</summary>
++    [HttpGet("{id:int}/cover")]
++    public async Task<IActionResult> GetCover(int id, CancellationToken cancellationToken)
++    {
++        var user = await _db.Users
++            .AsNoTracking()
++            .Include(u => u.Settings)
++            .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
++        if (user == null || user.CoverPhotoData == null)
++            return NotFound();
++
++        int? requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
++        if (requesterId != id && user.Settings?.PublicProfileEnabled == false)
++            return Forbid();
++
++        return File(user.CoverPhotoData, user.CoverPhotoMimeType ?? "image/jpeg");
++    }
++
+     /// <summary>Uploads a new profile photograph (multipart, field name "photo").</summary>
+     [Authorize]
+     [HttpPut("photo")]
+@@ -202,6 +282,24 @@ public class ProfileController : ControllerBase
+         user.Settings.WhoCanSeeCompanionsList = request.WhoCanSeeCompanionsList;
+         user.Settings.AllowCompanionTagging = request.AllowCompanionTagging;
+         user.Settings.ApproveTagsBeforePost = request.ApproveTagsBeforePost;
++
++        // The blue-tick verification lives on the member row and is mirrored into the
++        // settings section: the website saves it through this endpoint.
++        user.IsVerified = request.IsVerified;
++        user.VerifiedEmail = string.IsNullOrWhiteSpace(request.VerificationEmail)
++            ? null
++            : request.VerificationEmail.Trim();
++        user.VerificationType = request.VerificationType is "work" or "university"
++            ? request.VerificationType
++            : null;
++        user.VerifiedAtUtc = request.IsVerified
++            ? (request.VerifiedAtUtc ?? DateTime.UtcNow)
++            : null;
++        user.Settings.IsVerified = request.IsVerified;
++        user.Settings.VerificationEmail = user.VerifiedEmail;
++        user.Settings.VerificationType = user.VerificationType;
++        user.Settings.VerifiedAtUtc = user.VerifiedAtUtc;
++
+         user.Settings.UpdatedAtUtc = DateTime.UtcNow;
+         await _db.SaveChangesAsync(cancellationToken);
+ 
+diff --git a/Dtos/JourneyDtos.cs b/Dtos/JourneyDtos.cs
+index 347aaa0..28d10fa 100644
+--- a/Dtos/JourneyDtos.cs
++++ b/Dtos/JourneyDtos.cs
+@@ -89,6 +89,9 @@ public class SaveJourneyPostRequest
+     public List<string>? Hashtags { get; set; }
+     public PostAudienceDto? Audience { get; set; }
+ 
++    /// <summary>Companions tagged in the post (applied on create; replaces the tag set on update).</summary>
++    public List<int>? TaggedCompanionIds { get; set; }
++
+     /// <summary>When set, the new post shares this post on the author's feed.</summary>
+     public long? OriginalPostId { get; set; }
+     public string? SharedText { get; set; }
+diff --git a/Dtos/Mappers.cs b/Dtos/Mappers.cs
+index c5a28ee..1818abe 100644
+--- a/Dtos/Mappers.cs
++++ b/Dtos/Mappers.cs
+@@ -58,6 +58,12 @@ public static class ProfileMapper
+             ContactNumber = user.ContactNumber,
+             PostalAddress = user.PostalAddress,
+             AboutMe = user.AboutMe,
++            AboutMeDetailsJson = user.AboutMeDetailsJson,
++            ActiveStatus = user.ActiveStatus,
++            CustomStatusText = user.CustomStatusText,
++            CoverPhotoUrl = user.CoverPhotoData != null
++                ? $"/api/profile/{user.Id}/cover"
++                : user.CoverPhotoUrl,
+             Profession = user.Profession,
+             Status = user.Status,
+             ProfilePhotoUrl = user.ProfilePhotoData != null
+@@ -144,6 +150,7 @@ public static class CommentMapper
+             CreatedAtUtc = comment.CreatedAtUtc,
+             LikeCount = comment.LikeCount,
+             DislikeCount = comment.DislikeCount,
++            ImageUrl = comment.ImageUrl,
+             Author = new AuthorInfoDto
+             {
+                 Id = comment.Author.Id,
+diff --git a/Dtos/MessageBookDtos.cs b/Dtos/MessageBookDtos.cs
+index 785d296..de19e55 100644
+--- a/Dtos/MessageBookDtos.cs
++++ b/Dtos/MessageBookDtos.cs
+@@ -9,6 +9,10 @@ public class CommentCreateRequest
+ 
+     /// <summary>Id of the top-level comment this is a reply to (omit for a new top-level post).</summary>
+     public int? ParentId { get; set; }
++
++    /// <summary>Optional photograph attached to the entry (URL or data URL the website renders).</summary>
++    [System.ComponentModel.DataAnnotations.MaxLength(1024)]
++    public string? ImageUrl { get; set; }
+ }
+ 
+ /// <summary>Body of POST /api/messagebook/{id}/reactions.</summary>
+@@ -36,6 +40,9 @@ public class CommentDto
+     public int LikeCount { get; set; }
+     public int DislikeCount { get; set; }
+ 
++    /// <summary>Optional photograph attached to the entry.</summary>
++    public string? ImageUrl { get; set; }
++
+     /// <summary>Poster details shown next to the comment.</summary>
+     public AuthorInfoDto Author { get; set; } = new();
+ 
+diff --git a/Dtos/ProfileDtos.cs b/Dtos/ProfileDtos.cs
+index 998261f..76ccec2 100644
+--- a/Dtos/ProfileDtos.cs
++++ b/Dtos/ProfileDtos.cs
+@@ -37,6 +37,21 @@ public class ProfileDto
+     public string? AboutMe { get; set; }
+     public string? Profession { get; set; }
+ 
++    /// <summary>
++    /// Structured About-me sub-sections (intro, work, education, hobbies, …) as the
++    /// JSON string the website writes; the API stores it verbatim on the member row.
++    /// </summary>
++    public string? AboutMeDetailsJson { get; set; }
++
++    /// <summary>Presence shown to other travelers: Active, Busy, Don't Disturb, Away, Inactive or Custom.</summary>
++    public string? ActiveStatus { get; set; }
++
++    /// <summary>Custom presence text used when <see cref="ActiveStatus"/> is "Custom".</summary>
++    public string? CustomStatusText { get; set; }
++
++    /// <summary>Relative API URL of the uploaded cover photograph, or the stored cover URL.</summary>
++    public string? CoverPhotoUrl { get; set; }
++
+     public string Status { get; set; } = string.Empty;
+ 
+     /// <summary>Relative API URL of the uploaded profile picture, or the OAuth provider picture URL as fallback.</summary>
+@@ -139,4 +154,16 @@ public class UpdateProfileRequest
+ 
+     [System.ComponentModel.DataAnnotations.MaxLength(60)]
+     public string? Profession { get; set; }
++
++    /// <summary>Structured About-me sub-sections as JSON (stored verbatim, max 8000 chars).</summary>
++    [System.ComponentModel.DataAnnotations.MaxLength(8000)]
++    public string? AboutMeDetailsJson { get; set; }
++
++    /// <summary>One of: Active, Busy, Don't Disturb, Away, Inactive, Custom.</summary>
++    [System.ComponentModel.DataAnnotations.MaxLength(20)]
++    public string? ActiveStatus { get; set; }
++
++    /// <summary>Custom presence text (max 15 letters on the website, 30 stored).</summary>
++    [System.ComponentModel.DataAnnotations.MaxLength(30)]
++    public string? CustomStatusText { get; set; }
+ }
+diff --git a/README.md b/README.md
+index aad5c26..adedb80 100644
+--- a/README.md
++++ b/README.md
+@@ -119,3 +119,22 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
+   `JourneyPosts.ImageUrls`) pointing at **Supabase Storage**.
+ - Message reaction maps (`{"👍": 2}`) and About Me details are stored as JSON
+   in `text` columns; hashtag / travel-style / image lists are `text[]` arrays.
++- **Complete community integration (website ↔ API).** The community pages read and
++  write their data through these endpoints; the following pieces complete the last gaps:
++  - `GET`/`PUT`/`DELETE /api/profile/cover` and `GET /api/profile/{id}/cover` store and
++    serve the cover photograph from `Users.CoverPhotoData` (mirroring the profile photo
++    endpoints). `ProfileDto.CoverPhotoUrl` points at `/api/profile/{id}/cover` when bytes
++    are stored.
++  - `PUT /api/profile` accepts three extra optional fields: `aboutMeDetailsJson` (the
++    structured About-me sub-sections, stored verbatim in `Users.AboutMeDetailsJson`),
++    `activeStatus` (validated against Active/Busy/Don't Disturb/Away/Inactive/Custom) and
++    `customStatusText`; `ProfileDto` answers all three (plus the cover URL) so the profile
++    page can reload its own presence and About-me editor content.
++  - `PUT /api/profile/settings` now also persists the blue-tick verification
++    (`isVerified`, `verificationEmail`, `verificationType`) onto the member row and its
++    settings mirror.
++  - `POST /api/journey` and `PUT /api/journey/{id}` accept `taggedCompanionIds`; the tags
++    are applied with the post (create adds, update replaces the tag set), so a newly
++    created post carries its tagged companions without extra round trips.
++  - `POST /api/messagebook` accepts `imageUrl` and `CommentDto` answers it, so message
++    book entries with an attached photograph are stored and re-served.
+-- 
+2.39.5
+

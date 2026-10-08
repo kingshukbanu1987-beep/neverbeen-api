@@ -9,6 +9,10 @@ public class CommentCreateRequest
 
     /// <summary>Id of the top-level comment this is a reply to (omit for a new top-level post).</summary>
     public int? ParentId { get; set; }
+
+    /// <summary>Optional photograph attached to the entry (URL or data URL the website renders).</summary>
+    [System.ComponentModel.DataAnnotations.MaxLength(1024)]
+    public string? ImageUrl { get; set; }
 }
 
 /// <summary>Body of POST /api/messagebook/{id}/reactions.</summary>
@@ -35,6 +39,9 @@ public class CommentDto
     public DateTime CreatedAtUtc { get; set; }
     public int LikeCount { get; set; }
     public int DislikeCount { get; set; }
+
+    /// <summary>Optional photograph attached to the entry.</summary>
+    public string? ImageUrl { get; set; }
 
     /// <summary>Poster details shown next to the comment.</summary>
     public AuthorInfoDto Author { get; set; } = new();

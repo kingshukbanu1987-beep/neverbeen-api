@@ -37,6 +37,21 @@ public class ProfileDto
     public string? AboutMe { get; set; }
     public string? Profession { get; set; }
 
+    /// <summary>
+    /// Structured About-me sub-sections (intro, work, education, hobbies, …) as the
+    /// JSON string the website writes; the API stores it verbatim on the member row.
+    /// </summary>
+    public string? AboutMeDetailsJson { get; set; }
+
+    /// <summary>Presence shown to other travelers: Active, Busy, Don't Disturb, Away, Inactive or Custom.</summary>
+    public string? ActiveStatus { get; set; }
+
+    /// <summary>Custom presence text used when <see cref="ActiveStatus"/> is "Custom".</summary>
+    public string? CustomStatusText { get; set; }
+
+    /// <summary>Relative API URL of the uploaded cover photograph, or the stored cover URL.</summary>
+    public string? CoverPhotoUrl { get; set; }
+
     public string Status { get; set; } = string.Empty;
 
     /// <summary>Relative API URL of the uploaded profile picture, or the OAuth provider picture URL as fallback.</summary>
@@ -139,4 +154,16 @@ public class UpdateProfileRequest
 
     [System.ComponentModel.DataAnnotations.MaxLength(60)]
     public string? Profession { get; set; }
+
+    /// <summary>Structured About-me sub-sections as JSON (stored verbatim, max 8000 chars).</summary>
+    [System.ComponentModel.DataAnnotations.MaxLength(8000)]
+    public string? AboutMeDetailsJson { get; set; }
+
+    /// <summary>One of: Active, Busy, Don't Disturb, Away, Inactive, Custom.</summary>
+    [System.ComponentModel.DataAnnotations.MaxLength(20)]
+    public string? ActiveStatus { get; set; }
+
+    /// <summary>Custom presence text (max 15 letters on the website, 30 stored).</summary>
+    [System.ComponentModel.DataAnnotations.MaxLength(30)]
+    public string? CustomStatusText { get; set; }
 }

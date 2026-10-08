@@ -131,6 +131,7 @@ public class JourneyController : ControllerBase
         await _db.SaveChangesAsync(cancellationToken);
 
         await SaveAudience(post.Id, request.Audience, cancellationToken);
+        await ApplyTags(post.Id, request.TaggedCompanionIds, replace: false, cancellationToken);
         if (request.OriginalPostId.HasValue)
         {
             var original = await _db.JourneyPosts.FindAsync(new object?[] { request.OriginalPostId.Value }, cancellationToken);
@@ -167,6 +168,8 @@ public class JourneyController : ControllerBase
         await _db.SaveChangesAsync(cancellationToken);
 
         await SaveAudience(post.Id, request.Audience, cancellationToken);
+        if (request.TaggedCompanionIds != null)
+            await ApplyTags(post.Id, request.TaggedCompanionIds, replace: true, cancellationToken);
 
         var dto = (await BuildPostDtos(new List<JourneyPost> { post }, myId, cancellationToken, includeComments: true)).First();
         return Ok(dto);
@@ -439,6 +442,55 @@ public class JourneyController : ControllerBase
             await _db.SaveChangesAsync(cancellationToken);
         }
         return NoContent();
+    }
+
+    /// <summary>
+    /// Applies the tagged companions of a post. With <paramref name="replace"/> the
+    /// stored tag set is replaced (edit), otherwise ids are added that are not tagged
+    /// yet (create). Tagging yourself is allowed; unknown ids are ignored.
+    /// </summary>
+    private async Task ApplyTags(long postId, List<int>? userIds, bool replace, CancellationToken cancellationToken)
+    {
+        if (userIds == null || userIds.Count == 0)
+        {
+            if (replace)
+            {
+                var stale = await _db.JourneyPostTags.Where(t => t.PostId == postId).ToListAsync(cancellationToken);
+                if (stale.Count > 0)
+                {
+                    _db.JourneyPostTags.RemoveRange(stale);
+                    await _db.SaveChangesAsync(cancellationToken);
+                }
+            }
+            return;
+        }
+
+        var knownIds = (await _db.Users.AsNoTracking()
+            .Where(u => userIds.Contains(u.Id))
+            .Select(u => u.Id)
+            .ToListAsync(cancellationToken)).ToHashSet();
+
+        var existing = await _db.JourneyPostTags
+            .Where(t => t.PostId == postId)
+            .ToListAsync(cancellationToken);
+
+        if (replace)
+        {
+            var keep = existing.Where(t => knownIds.Contains(t.UserId) && userIds.Contains(t.UserId)).ToList();
+            var dropped = existing.Except(keep).ToList();
+            if (dropped.Count > 0)
+                _db.JourneyPostTags.RemoveRange(dropped);
+            existing = keep;
+        }
+
+        foreach (var userId in userIds)
+        {
+            if (!knownIds.Contains(userId) || existing.Any(t => t.UserId == userId))
+                continue;
+            _db.JourneyPostTags.Add(new JourneyPostTag { PostId = postId, UserId = userId });
+        }
+
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     // ------------------------------------------------------------------ helpers

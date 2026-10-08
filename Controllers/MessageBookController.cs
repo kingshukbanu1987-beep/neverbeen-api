@@ -147,6 +147,7 @@ public class MessageBookController : ControllerBase
             Text = request.Text.Trim(),
             AuthorId = userId,
             ParentId = request.ParentId,
+            ImageUrl = string.IsNullOrWhiteSpace(request.ImageUrl) ? null : request.ImageUrl.Trim(),
             CreatedAtUtc = DateTime.UtcNow
         };
         _db.CommunityComments.Add(comment);

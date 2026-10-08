@@ -89,6 +89,9 @@ public class SaveJourneyPostRequest
     public List<string>? Hashtags { get; set; }
     public PostAudienceDto? Audience { get; set; }
 
+    /// <summary>Companions tagged in the post (applied on create; replaces the tag set on update).</summary>
+    public List<int>? TaggedCompanionIds { get; set; }
+
     /// <summary>When set, the new post shares this post on the author's feed.</summary>
     public long? OriginalPostId { get; set; }
     public string? SharedText { get; set; }

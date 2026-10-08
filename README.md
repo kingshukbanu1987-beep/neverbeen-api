@@ -119,3 +119,22 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
   `JourneyPosts.ImageUrls`) pointing at **Supabase Storage**.
 - Message reaction maps (`{"👍": 2}`) and About Me details are stored as JSON
   in `text` columns; hashtag / travel-style / image lists are `text[]` arrays.
+- **Complete community integration (website ↔ API).** The community pages read and
+  write their data through these endpoints; the following pieces complete the last gaps:
+  - `GET`/`PUT`/`DELETE /api/profile/cover` and `GET /api/profile/{id}/cover` store and
+    serve the cover photograph from `Users.CoverPhotoData` (mirroring the profile photo
+    endpoints). `ProfileDto.CoverPhotoUrl` points at `/api/profile/{id}/cover` when bytes
+    are stored.
+  - `PUT /api/profile` accepts three extra optional fields: `aboutMeDetailsJson` (the
+    structured About-me sub-sections, stored verbatim in `Users.AboutMeDetailsJson`),
+    `activeStatus` (validated against Active/Busy/Don't Disturb/Away/Inactive/Custom) and
+    `customStatusText`; `ProfileDto` answers all three (plus the cover URL) so the profile
+    page can reload its own presence and About-me editor content.
+  - `PUT /api/profile/settings` now also persists the blue-tick verification
+    (`isVerified`, `verificationEmail`, `verificationType`) onto the member row and its
+    settings mirror.
+  - `POST /api/journey` and `PUT /api/journey/{id}` accept `taggedCompanionIds`; the tags
+    are applied with the post (create adds, update replaces the tag set), so a newly
+    created post carries its tagged companions without extra round trips.
+  - `POST /api/messagebook` accepts `imageUrl` and `CommentDto` answers it, so message
+    book entries with an attached photograph are stored and re-served.

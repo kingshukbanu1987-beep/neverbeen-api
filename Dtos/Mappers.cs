@@ -58,6 +58,12 @@ public static class ProfileMapper
             ContactNumber = user.ContactNumber,
             PostalAddress = user.PostalAddress,
             AboutMe = user.AboutMe,
+            AboutMeDetailsJson = user.AboutMeDetailsJson,
+            ActiveStatus = user.ActiveStatus,
+            CustomStatusText = user.CustomStatusText,
+            CoverPhotoUrl = user.CoverPhotoData != null
+                ? $"/api/profile/{user.Id}/cover"
+                : user.CoverPhotoUrl,
             Profession = user.Profession,
             Status = user.Status,
             ProfilePhotoUrl = user.ProfilePhotoData != null
@@ -144,6 +150,7 @@ public static class CommentMapper
             CreatedAtUtc = comment.CreatedAtUtc,
             LikeCount = comment.LikeCount,
             DislikeCount = comment.DislikeCount,
+            ImageUrl = comment.ImageUrl,
             Author = new AuthorInfoDto
             {
                 Id = comment.Author.Id,

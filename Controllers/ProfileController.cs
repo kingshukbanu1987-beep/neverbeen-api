@@ -85,6 +85,9 @@ public class ProfileController : ControllerBase
                 return BadRequest(new { error = "The selected city does not belong to the selected country." });
         }
 
+        if (request.ActiveStatus != null && !AppConstants.ActiveStatuses.Contains(request.ActiveStatus, StringComparer.OrdinalIgnoreCase))
+            return BadRequest(new { error = $"Active status must be one of: {string.Join(", ", AppConstants.ActiveStatuses)}." });
+
         if (!string.IsNullOrWhiteSpace(request.FullName))
             user.FullName = request.FullName.Trim();
         // First name, last name and state are their own columns; an explicit value (or an
@@ -114,12 +117,89 @@ public class ProfileController : ControllerBase
             user.AboutMe = request.AboutMe.Trim();
         if (request.Profession != null)
             user.Profession = request.Profession;
+        // Structured About me sub-sections (stored verbatim as JSON) and the presence
+        // columns: an explicit value (an empty string clears) is applied, an omitted
+        // field keeps its current value.
+        if (request.AboutMeDetailsJson != null)
+            user.AboutMeDetailsJson = string.IsNullOrWhiteSpace(request.AboutMeDetailsJson)
+                ? null
+                : request.AboutMeDetailsJson.Trim();
+        if (request.ActiveStatus != null)
+            user.ActiveStatus = string.IsNullOrWhiteSpace(request.ActiveStatus)
+                ? "Active"
+                : AppConstants.ActiveStatuses.First(a =>
+                    string.Equals(a, request.ActiveStatus.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (request.CustomStatusText != null)
+            user.CustomStatusText = string.IsNullOrWhiteSpace(request.CustomStatusText)
+                ? null
+                : request.CustomStatusText.Trim();
 
         user.UpdatedAtUtc = DateTime.UtcNow;
         await _db.SaveChangesAsync(cancellationToken);
 
         var updated = await LoadFullUserAsync(user.Id, cancellationToken);
         return Ok(await BuildDtoAsync(updated!, cancellationToken));
+    }
+
+    /// <summary>Uploads a new cover photograph (multipart, field name "photo").</summary>
+    [Authorize]
+    [HttpPut("cover")]
+    [Consumes("multipart/form-data")]
+    public async Task<ActionResult<ProfileDto>> UploadCover([FromForm] IFormFile photo, CancellationToken cancellationToken)
+    {
+        var user = await _db.Users
+            .FirstOrDefaultAsync(u => u.Id == User.GetUserId(), cancellationToken);
+        if (user == null)
+            return NotFound();
+
+        var error = ImageValidation.ValidateRequired(photo, AppConstants.MaxProfilePhotoBytes);
+        if (error != null)
+            return BadRequest(new { error });
+
+        using var memory = new MemoryStream();
+        await photo.CopyToAsync(memory, cancellationToken);
+        user.CoverPhotoData = memory.ToArray();
+        user.CoverPhotoMimeType = photo.ContentType ?? "image/jpeg";
+        user.UpdatedAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+
+        var updated = await LoadFullUserAsync(user.Id, cancellationToken);
+        return Ok(await BuildDtoAsync(updated!, cancellationToken));
+    }
+
+    /// <summary>Removes the uploaded cover photograph.</summary>
+    [Authorize]
+    [HttpDelete("cover")]
+    public async Task<IActionResult> DeleteCover(CancellationToken cancellationToken)
+    {
+        var user = await _db.Users
+            .FirstOrDefaultAsync(u => u.Id == User.GetUserId(), cancellationToken);
+        if (user == null)
+            return NotFound();
+
+        user.CoverPhotoData = null;
+        user.CoverPhotoMimeType = null;
+        user.UpdatedAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    /// <summary>Serves the cover photograph as an image (used by &lt;img&gt; tags across the app).</summary>
+    [HttpGet("{id:int}/cover")]
+    public async Task<IActionResult> GetCover(int id, CancellationToken cancellationToken)
+    {
+        var user = await _db.Users
+            .AsNoTracking()
+            .Include(u => u.Settings)
+            .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
+        if (user == null || user.CoverPhotoData == null)
+            return NotFound();
+
+        int? requesterId = User.Identity?.IsAuthenticated == true ? User.GetUserId() : null;
+        if (requesterId != id && user.Settings?.PublicProfileEnabled == false)
+            return Forbid();
+
+        return File(user.CoverPhotoData, user.CoverPhotoMimeType ?? "image/jpeg");
     }
 
     /// <summary>Uploads a new profile photograph (multipart, field name "photo").</summary>
@@ -202,6 +282,24 @@ public class ProfileController : ControllerBase
         user.Settings.WhoCanSeeCompanionsList = request.WhoCanSeeCompanionsList;
         user.Settings.AllowCompanionTagging = request.AllowCompanionTagging;
         user.Settings.ApproveTagsBeforePost = request.ApproveTagsBeforePost;
+
+        // The blue-tick verification lives on the member row and is mirrored into the
+        // settings section: the website saves it through this endpoint.
+        user.IsVerified = request.IsVerified;
+        user.VerifiedEmail = string.IsNullOrWhiteSpace(request.VerificationEmail)
+            ? null
+            : request.VerificationEmail.Trim();
+        user.VerificationType = request.VerificationType is "work" or "university"
+            ? request.VerificationType
+            : null;
+        user.VerifiedAtUtc = request.IsVerified
+            ? (request.VerifiedAtUtc ?? DateTime.UtcNow)
+            : null;
+        user.Settings.IsVerified = request.IsVerified;
+        user.Settings.VerificationEmail = user.VerifiedEmail;
+        user.Settings.VerificationType = user.VerificationType;
+        user.Settings.VerifiedAtUtc = user.VerifiedAtUtc;
+
         user.Settings.UpdatedAtUtc = DateTime.UtcNow;
         await _db.SaveChangesAsync(cancellationToken);
 

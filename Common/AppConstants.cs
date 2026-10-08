@@ -30,6 +30,12 @@ public static class AppConstants
         "light", "dark", "system"
     };
 
+    /// <summary>Presence values stored on the member row (Users.ActiveStatus).</summary>
+    public static readonly string[] ActiveStatuses =
+    {
+        "Active", "Busy", "Don't Disturb", "Away", "Inactive", "Custom"
+    };
+
     public const int MaxProfilePhotoBytes = 5 * 1024 * 1024;   // 5 MB
     public const int MaxGalleryPhotoBytes = 8 * 1024 * 1024;   // 8 MB
 

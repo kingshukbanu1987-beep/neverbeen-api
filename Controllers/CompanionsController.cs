@@ -139,6 +139,7 @@ public class CompanionsController : ControllerBase
         if (row == null || row.Status != CompanionshipStatus.Pending || row.RequesterId == myId)
             return BadRequest(new { error = "There is no incoming companionship request from this traveler." });
 
+        await AnswerRequestNotifications(myId, row.RequesterId, "rejected", cancellationToken);
         _db.Companionships.Remove(row);
         await _db.SaveChangesAsync(cancellationToken);
         return Ok(new CompanionshipResultDto { Status = "none", Message = "Companionship request rejected." });
@@ -153,6 +154,7 @@ public class CompanionsController : ControllerBase
         if (row == null || row.Status != CompanionshipStatus.Pending || row.RequesterId != myId)
             return BadRequest(new { error = "There is no outgoing companionship request to this traveler." });
 
+        await AnswerRequestNotifications(userId, myId, "cancelled", cancellationToken);
         _db.Companionships.Remove(row);
         await _db.SaveChangesAsync(cancellationToken);
         return Ok(new CompanionshipResultDto { Status = "none", Message = "Companionship request cancelled." });
@@ -202,6 +204,10 @@ public class CompanionsController : ControllerBase
         row.Status = CompanionshipStatus.Connected;
         row.ConnectedAtUtc = DateTime.UtcNow;
 
+        // The request notification the member received is answered, so the Notifications
+        // page shows "Companionship Approved" instead of offering Approve / Reject again.
+        await AnswerRequestNotifications(myId, row.RequesterId, "approved", cancellationToken);
+
         _db.Notifications.Add(new CommunityNotification
         {
             UserId = row.RequesterId,
@@ -214,6 +220,27 @@ public class CompanionsController : ControllerBase
         await EnsureFollow(myId, row.RequesterId, cancellationToken);
         await _db.SaveChangesAsync(cancellationToken);
         return Ok(new CompanionshipResultDto { Status = "connected", Message = "You are now companions." });
+    }
+
+    /// <summary>
+    /// Stores the answer ("approved", "rejected" or "cancelled") on the companionship request
+    /// notifications that <paramref name="requesterId"/> sent to <paramref name="recipientId"/>.
+    /// The caller saves the change together with its own companionship update.
+    /// </summary>
+    private async Task AnswerRequestNotifications(int recipientId, int requesterId, string status, CancellationToken cancellationToken)
+    {
+        var pending = await _db.Notifications
+            .Where(n => n.UserId == recipientId
+                        && n.FromUserId == requesterId
+                        && n.Type == NotificationTypes.CompanionshipRequest
+                        && n.Status == "pending")
+            .ToListAsync(cancellationToken);
+
+        foreach (var notification in pending)
+        {
+            notification.Status = status;
+            notification.IsRead = true;
+        }
     }
 
     private async Task EnsureFollow(int followerId, int followeeId, CancellationToken cancellationToken)

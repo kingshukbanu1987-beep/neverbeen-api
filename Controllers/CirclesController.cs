@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -57,6 +58,9 @@ public class CirclesController : ControllerBase
         return Ok((await BuildCircleDtos(new List<Circle> { circle }, myId, cancellationToken)).First());
     }
 
+    /// <summary>Largest circle photo accepted as a data URL (the website allows 1 MB before encoding).</summary>
+    private const int MaxCirclePhotoChars = 2 * 1024 * 1024;
+
     /// <summary>Creates a circle (the creator becomes owner + admin + member).</summary>
     [HttpPost]
     public async Task<ActionResult<CircleDto>> Create([FromBody] SaveCircleRequest request, CancellationToken cancellationToken)
@@ -64,6 +68,9 @@ public class CirclesController : ControllerBase
         var myId = User.GetUserId();
         if (string.IsNullOrWhiteSpace(request.Name))
             return BadRequest(new { error = "Circle name is required." });
+        var problem = ValidateRequest(request);
+        if (problem != null)
+            return BadRequest(new { error = problem });
 
         var circle = new Circle
         {
@@ -94,6 +101,9 @@ public class CirclesController : ControllerBase
     public async Task<ActionResult<CircleDto>> Update(int id, [FromBody] SaveCircleRequest request, CancellationToken cancellationToken)
     {
         var myId = User.GetUserId();
+        var problem = ValidateRequest(request);
+        if (problem != null)
+            return BadRequest(new { error = problem });
         var circle = await _db.Circles.FirstOrDefaultAsync(c => c.Id == id, cancellationToken);
         if (circle == null)
             return NotFound();
@@ -255,6 +265,38 @@ public class CirclesController : ControllerBase
     }
 
     // ------------------------------------------------------------------ helpers
+
+    /// <summary>
+    /// Checks the circle fields against the stored column sizes and the accepted photo formats,
+    /// so an out-of-range value is answered with a clear message instead of a failed insert.
+    /// </summary>
+    private static string? ValidateRequest(SaveCircleRequest request)
+    {
+        if (request.Name != null && request.Name.Trim().Length > 120)
+            return "Circle name must be 120 characters or fewer.";
+        if (request.Description != null && request.Description.Length > 500)
+            return "Circle description must be 500 characters or fewer.";
+        if (request.Icon != null && request.Icon.Length > 60)
+            return "Circle icon is too long.";
+        if (request.Color != null && request.Color.Length > 20)
+            return "Circle colour is too long.";
+
+        var photo = request.PhotoUrl?.Trim();
+        if (string.IsNullOrEmpty(photo))
+            return null;
+        if (photo.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!Regex.IsMatch(photo, @"^data:image/(png|jpe?g|gif|webp);base64,", RegexOptions.IgnoreCase))
+                return "Circle photo must be a PNG, JPEG, GIF or WebP image.";
+            if (photo.Length > MaxCirclePhotoChars)
+                return "Circle photo must be 1 MB or smaller.";
+        }
+        else if (photo.Length > 1024)
+        {
+            return "Circle photo link must be 1024 characters or fewer.";
+        }
+        return null;
+    }
 
     private async Task<bool> IsAdmin(int circleId, int userId, CancellationToken cancellationToken)
     {

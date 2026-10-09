@@ -1,0 +1,245 @@
+From 7fd2b66db20daabb26ad31395a7b006ea698dbb8 Mon Sep 17 00:00:00 2001
+From: Arena Agent <agent@arena.ai>
+Date: Fri, 9 Oct 2026 03:07:01 +0000
+Subject: [PATCH] Make companion requests, circle saves and profile photos
+ reach the website
+
+- Companion requests: accept, reject and cancel now record their answer
+  ("approved" / "rejected" / "cancelled") on the companionship_request
+  notification the other member received. Before, it stayed "pending" and
+  Approve / Reject reappeared after a reload.
+- Followers / Following: FollowDto carries Country and City so the cards
+  can show the member's location.
+- Circles: PhotoUrl is no longer capped at 1024 characters (uploaded
+  covers are data URLs). Create / update validate name (120), description
+  (500), icon (60), colour (20) and photo (PNG/JPEG/GIF/WebP, 1 MB) and
+  answer 400 with a message instead of failing the insert.
+- Profile / message-book comments: ProfilePhotoUrl (uploaded photo) is
+  used when no photo is stored in the database, instead of only the
+  external picture URL.
+---
+ Controllers/CirclesController.cs    | 42 +++++++++++++++++++++++++++++
+ Controllers/CompanionsController.cs | 27 +++++++++++++++++++
+ Controllers/FollowsController.cs    |  3 +++
+ Dtos/CompanionDtos.cs               |  5 ++++
+ Dtos/Mappers.cs                     |  4 +--
+ Entities/Circle.cs                  |  6 +++--
+ 6 files changed, 83 insertions(+), 4 deletions(-)
+
+diff --git a/Controllers/CirclesController.cs b/Controllers/CirclesController.cs
+index d2e6ac6..db84d42 100644
+--- a/Controllers/CirclesController.cs
++++ b/Controllers/CirclesController.cs
+@@ -1,4 +1,5 @@
+ using System.Text.Json;
++using System.Text.RegularExpressions;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
+ using Microsoft.EntityFrameworkCore;
+@@ -57,6 +58,9 @@ public class CirclesController : ControllerBase
+         return Ok((await BuildCircleDtos(new List<Circle> { circle }, myId, cancellationToken)).First());
+     }
+ 
++    /// <summary>Largest circle photo accepted as a data URL (the website allows 1 MB before encoding).</summary>
++    private const int MaxCirclePhotoChars = 2 * 1024 * 1024;
++
+     /// <summary>Creates a circle (the creator becomes owner + admin + member).</summary>
+     [HttpPost]
+     public async Task<ActionResult<CircleDto>> Create([FromBody] SaveCircleRequest request, CancellationToken cancellationToken)
+@@ -64,6 +68,9 @@ public class CirclesController : ControllerBase
+         var myId = User.GetUserId();
+         if (string.IsNullOrWhiteSpace(request.Name))
+             return BadRequest(new { error = "Circle name is required." });
++        var problem = ValidateRequest(request);
++        if (problem != null)
++            return BadRequest(new { error = problem });
+ 
+         var circle = new Circle
+         {
+@@ -94,6 +101,9 @@ public class CirclesController : ControllerBase
+     public async Task<ActionResult<CircleDto>> Update(int id, [FromBody] SaveCircleRequest request, CancellationToken cancellationToken)
+     {
+         var myId = User.GetUserId();
++        var problem = ValidateRequest(request);
++        if (problem != null)
++            return BadRequest(new { error = problem });
+         var circle = await _db.Circles.FirstOrDefaultAsync(c => c.Id == id, cancellationToken);
+         if (circle == null)
+             return NotFound();
+@@ -256,6 +266,38 @@ public class CirclesController : ControllerBase
+ 
+     // ------------------------------------------------------------------ helpers
+ 
++    /// <summary>
++    /// Checks the circle fields against the stored column sizes and the accepted photo formats,
++    /// so an out-of-range value is answered with a clear message instead of a failed insert.
++    /// </summary>
++    private static string? ValidateRequest(SaveCircleRequest request)
++    {
++        if (request.Name != null && request.Name.Trim().Length > 120)
++            return "Circle name must be 120 characters or fewer.";
++        if (request.Description != null && request.Description.Length > 500)
++            return "Circle description must be 500 characters or fewer.";
++        if (request.Icon != null && request.Icon.Length > 60)
++            return "Circle icon is too long.";
++        if (request.Color != null && request.Color.Length > 20)
++            return "Circle colour is too long.";
++
++        var photo = request.PhotoUrl?.Trim();
++        if (string.IsNullOrEmpty(photo))
++            return null;
++        if (photo.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
++        {
++            if (!Regex.IsMatch(photo, @"^data:image/(png|jpe?g|gif|webp);base64,", RegexOptions.IgnoreCase))
++                return "Circle photo must be a PNG, JPEG, GIF or WebP image.";
++            if (photo.Length > MaxCirclePhotoChars)
++                return "Circle photo must be 1 MB or smaller.";
++        }
++        else if (photo.Length > 1024)
++        {
++            return "Circle photo link must be 1024 characters or fewer.";
++        }
++        return null;
++    }
++
+     private async Task<bool> IsAdmin(int circleId, int userId, CancellationToken cancellationToken)
+     {
+         var circle = await _db.Circles.AsNoTracking().FirstOrDefaultAsync(c => c.Id == circleId, cancellationToken);
+diff --git a/Controllers/CompanionsController.cs b/Controllers/CompanionsController.cs
+index e99e587..61b18a3 100644
+--- a/Controllers/CompanionsController.cs
++++ b/Controllers/CompanionsController.cs
+@@ -139,6 +139,7 @@ public class CompanionsController : ControllerBase
+         if (row == null || row.Status != CompanionshipStatus.Pending || row.RequesterId == myId)
+             return BadRequest(new { error = "There is no incoming companionship request from this traveler." });
+ 
++        await AnswerRequestNotifications(myId, row.RequesterId, "rejected", cancellationToken);
+         _db.Companionships.Remove(row);
+         await _db.SaveChangesAsync(cancellationToken);
+         return Ok(new CompanionshipResultDto { Status = "none", Message = "Companionship request rejected." });
+@@ -153,6 +154,7 @@ public class CompanionsController : ControllerBase
+         if (row == null || row.Status != CompanionshipStatus.Pending || row.RequesterId != myId)
+             return BadRequest(new { error = "There is no outgoing companionship request to this traveler." });
+ 
++        await AnswerRequestNotifications(userId, myId, "cancelled", cancellationToken);
+         _db.Companionships.Remove(row);
+         await _db.SaveChangesAsync(cancellationToken);
+         return Ok(new CompanionshipResultDto { Status = "none", Message = "Companionship request cancelled." });
+@@ -202,6 +204,10 @@ public class CompanionsController : ControllerBase
+         row.Status = CompanionshipStatus.Connected;
+         row.ConnectedAtUtc = DateTime.UtcNow;
+ 
++        // The request notification the member received is answered, so the Notifications
++        // page shows "Companionship Approved" instead of offering Approve / Reject again.
++        await AnswerRequestNotifications(myId, row.RequesterId, "approved", cancellationToken);
++
+         _db.Notifications.Add(new CommunityNotification
+         {
+             UserId = row.RequesterId,
+@@ -216,6 +222,27 @@ public class CompanionsController : ControllerBase
+         return Ok(new CompanionshipResultDto { Status = "connected", Message = "You are now companions." });
+     }
+ 
++    /// <summary>
++    /// Stores the answer ("approved", "rejected" or "cancelled") on the companionship request
++    /// notifications that <paramref name="requesterId"/> sent to <paramref name="recipientId"/>.
++    /// The caller saves the change together with its own companionship update.
++    /// </summary>
++    private async Task AnswerRequestNotifications(int recipientId, int requesterId, string status, CancellationToken cancellationToken)
++    {
++        var pending = await _db.Notifications
++            .Where(n => n.UserId == recipientId
++                        && n.FromUserId == requesterId
++                        && n.Type == NotificationTypes.CompanionshipRequest
++                        && n.Status == "pending")
++            .ToListAsync(cancellationToken);
++
++        foreach (var notification in pending)
++        {
++            notification.Status = status;
++            notification.IsRead = true;
++        }
++    }
++
+     private async Task EnsureFollow(int followerId, int followeeId, CancellationToken cancellationToken)
+     {
+         if (!await _db.Follows.AnyAsync(f => f.FollowerId == followerId && f.FolloweeId == followeeId, cancellationToken))
+diff --git a/Controllers/FollowsController.cs b/Controllers/FollowsController.cs
+index 3dfd9a6..ee504c7 100644
+--- a/Controllers/FollowsController.cs
++++ b/Controllers/FollowsController.cs
+@@ -102,6 +102,7 @@ public class FollowsController : ControllerBase
+     {
+         var userIds = rows.Select(pickUserId).Distinct().ToList();
+         var users = await _db.Users.AsNoTracking()
++            .Include(u => u.Country).Include(u => u.City)
+             .Where(u => userIds.Contains(u.Id))
+             .ToDictionaryAsync(u => u.Id, cancellationToken);
+ 
+@@ -119,6 +120,8 @@ public class FollowsController : ControllerBase
+                         ? $"/api/profile/{u.Id}/photo"
+                         : u.ProfilePhotoUrl ?? u.ExternalProfilePictureUrl ?? string.Empty,
+                     Profession = u.Profession,
++                    Country = u.Country?.Name,
++                    City = u.City?.Name,
+                     FollowedAtUtc = r.CreatedAtUtc
+                 };
+             })
+diff --git a/Dtos/CompanionDtos.cs b/Dtos/CompanionDtos.cs
+index 149429c..3ee32e9 100644
+--- a/Dtos/CompanionDtos.cs
++++ b/Dtos/CompanionDtos.cs
+@@ -38,6 +38,11 @@ public class FollowDto
+     public string FullName { get; set; } = string.Empty;
+     public string ProfilePhotoUrl { get; set; } = string.Empty;
+     public string? Profession { get; set; }
++
++    /// <summary>Country / city of the member (shown on the Followers and Following cards).</summary>
++    public string? Country { get; set; }
++    public string? City { get; set; }
++
+     public DateTime FollowedAtUtc { get; set; }
+ }
+ 
+diff --git a/Dtos/Mappers.cs b/Dtos/Mappers.cs
+index 1818abe..2e87726 100644
+--- a/Dtos/Mappers.cs
++++ b/Dtos/Mappers.cs
+@@ -68,7 +68,7 @@ public static class ProfileMapper
+             Status = user.Status,
+             ProfilePhotoUrl = user.ProfilePhotoData != null
+                 ? $"/api/profile/{user.Id}/photo"
+-                : user.ExternalProfilePictureUrl,
++                : user.ProfilePhotoUrl ?? user.ExternalProfilePictureUrl,
+             ExternalProfilePictureUrl = user.ExternalProfilePictureUrl,
+             CreatedAtUtc = user.CreatedAtUtc,
+             Settings = user.Settings == null
+@@ -157,7 +157,7 @@ public static class CommentMapper
+                 FullName = comment.Author.FullName,
+                 ProfilePhotoUrl = comment.Author.ProfilePhotoData != null
+                     ? $"/api/profile/{comment.Author.Id}/photo"
+-                    : comment.Author.ExternalProfilePictureUrl,
++                    : comment.Author.ProfilePhotoUrl ?? comment.Author.ExternalProfilePictureUrl,
+                 Profession = comment.Author.Profession
+             },
+             MyReaction = myReactions.TryGetValue(comment.Id, out var reaction)
+diff --git a/Entities/Circle.cs b/Entities/Circle.cs
+index c4e2f6b..d43ab4f 100644
+--- a/Entities/Circle.cs
++++ b/Entities/Circle.cs
+@@ -21,8 +21,10 @@ public class Circle
+     [MaxLength(20)]
+     public string? Color { get; set; }
+ 
+-    /// <summary>Cover photo (upload or stock travel image).</summary>
+-    [MaxLength(1024)]
++    /// <summary>
++    /// Cover photo: an uploaded image (data URL, validated by the API) or a stock image link.
++    /// Stored as unbounded text — a 1 MB upload is far longer than the old 1024-character column.
++    /// </summary>
+     public string? PhotoUrl { get; set; }
+ 
+     /// <summary>Member who created the Circle (always an admin).</summary>
+-- 
+2.39.5
+

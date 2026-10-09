@@ -38,6 +38,11 @@ public class FollowDto
     public string FullName { get; set; } = string.Empty;
     public string ProfilePhotoUrl { get; set; } = string.Empty;
     public string? Profession { get; set; }
+
+    /// <summary>Country / city of the member (shown on the Followers and Following cards).</summary>
+    public string? Country { get; set; }
+    public string? City { get; set; }
+
     public DateTime FollowedAtUtc { get; set; }
 }
 

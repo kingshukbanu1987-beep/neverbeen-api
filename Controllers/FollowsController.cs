@@ -102,6 +102,7 @@ public class FollowsController : ControllerBase
     {
         var userIds = rows.Select(pickUserId).Distinct().ToList();
         var users = await _db.Users.AsNoTracking()
+            .Include(u => u.Country).Include(u => u.City)
             .Where(u => userIds.Contains(u.Id))
             .ToDictionaryAsync(u => u.Id, cancellationToken);
 
@@ -119,6 +120,8 @@ public class FollowsController : ControllerBase
                         ? $"/api/profile/{u.Id}/photo"
                         : u.ProfilePhotoUrl ?? u.ExternalProfilePictureUrl ?? string.Empty,
                     Profession = u.Profession,
+                    Country = u.Country?.Name,
+                    City = u.City?.Name,
                     FollowedAtUtc = r.CreatedAtUtc
                 };
             })

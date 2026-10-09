@@ -21,8 +21,10 @@ public class Circle
     [MaxLength(20)]
     public string? Color { get; set; }
 
-    /// <summary>Cover photo (upload or stock travel image).</summary>
-    [MaxLength(1024)]
+    /// <summary>
+    /// Cover photo: an uploaded image (data URL, validated by the API) or a stock image link.
+    /// Stored as unbounded text — a 1 MB upload is far longer than the old 1024-character column.
+    /// </summary>
     public string? PhotoUrl { get; set; }
 
     /// <summary>Member who created the Circle (always an admin).</summary>

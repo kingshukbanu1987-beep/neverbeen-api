@@ -68,7 +68,7 @@ public static class ProfileMapper
             Status = user.Status,
             ProfilePhotoUrl = user.ProfilePhotoData != null
                 ? $"/api/profile/{user.Id}/photo"
-                : user.ExternalProfilePictureUrl,
+                : user.ProfilePhotoUrl ?? user.ExternalProfilePictureUrl,
             ExternalProfilePictureUrl = user.ExternalProfilePictureUrl,
             CreatedAtUtc = user.CreatedAtUtc,
             Settings = user.Settings == null
@@ -157,7 +157,7 @@ public static class CommentMapper
                 FullName = comment.Author.FullName,
                 ProfilePhotoUrl = comment.Author.ProfilePhotoData != null
                     ? $"/api/profile/{comment.Author.Id}/photo"
-                    : comment.Author.ExternalProfilePictureUrl,
+                    : comment.Author.ProfilePhotoUrl ?? comment.Author.ExternalProfilePictureUrl,
                 Profession = comment.Author.Profession
             },
             MyReaction = myReactions.TryGetValue(comment.Id, out var reaction)

@@ -191,6 +191,26 @@ public class MessagesController : ControllerBase
             ReplyToMessageId = request.ReplyToMessageId
         };
         _db.ChatMessages.Add(message);
+
+        // Requirement: every message the member receives adds one notification
+        // (Notifications page + header bell badge) and one item to the chat icon.
+        var otherParticipantIds = await _db.ConversationParticipants.AsNoTracking()
+            .Where(p => p.ConversationId == id && p.UserId != myId)
+            .Select(p => p.UserId)
+            .ToListAsync(cancellationToken);
+        foreach (var otherId in otherParticipantIds)
+        {
+            _db.Notifications.Add(new CommunityNotification
+            {
+                UserId = otherId,
+                Type = NotificationTypes.Message,
+                FromUserId = myId,
+                Message = $"sent you a message: “{NotificationTypes.MessagePreview(message.Text)}”",
+                RequestId = id,
+                CreatedAtUtc = message.SentAtUtc
+            });
+        }
+
         await _db.SaveChangesAsync(cancellationToken);
 
         // Sending marks the thread read up to the new message.

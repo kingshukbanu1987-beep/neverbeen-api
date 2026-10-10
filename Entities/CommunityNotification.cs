@@ -40,7 +40,16 @@ public static class NotificationTypes
     public const string CompanionshipAccepted = "companionship_accepted";
     public const string JourneyLike = "journey_like";
     public const string JourneyComment = "journey_comment";
+    /// <summary>One per messenger message (1:1 or Circle) — drives the bell badge and the Notifications list.</summary>
+    public const string Message = "message";
     public const string Followed = "followed";
     public const string Tagged = "tagged";
     public const string MessageBookReply = "messagebook_reply";
+
+    /// <summary>Notification text keeps the message preview short (column limit is 500 chars).</summary>
+    public static string MessagePreview(string text)
+    {
+        var clean = string.Join(' ', text.Split('\r', '\n', ' ', '\t', StringSplitOptions.RemoveEmptyEntries));
+        return clean.Length <= 120 ? clean : clean[..119] + "…";
+    }
 }

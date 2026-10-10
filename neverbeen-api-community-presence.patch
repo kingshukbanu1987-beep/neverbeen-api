@@ -1,0 +1,332 @@
+diff --git a/Common/PresenceRules.cs b/Common/PresenceRules.cs
+new file mode 100644
+index 0000000..0b2271b
+--- /dev/null
++++ b/Common/PresenceRules.cs
+@@ -0,0 +1,55 @@
++namespace NeverBeen.API.Common;
++
++/// <summary>
++/// Presence of a member (Users.ActiveStatus and Users.LastSeenUtc):
++///  - signing in sets the status to Active (AuthController.OauthLogin);
++///  - signing out sets it to Inactive, whatever status the member had (PresenceController.SignOut);
++///  - a member who has not used the community for more than <see cref="AwayAfter"/> is Away.
++///    Away is automatic: it is never stored as a choice, and when the member uses the community
++///    again the status they chose is shown again.
++/// </summary>
++public static class PresenceRules
++{
++    /// <summary>How long a member can be away from the community before they are shown as Away.</summary>
++    public static readonly TimeSpan AwayAfter = TimeSpan.FromMinutes(15);
++
++    /// <summary>
++    /// The status other members see. Inactive is never overridden. A stored "Away" (from before
++    /// Away became automatic) reads as Active. Any other status becomes Away when the member's
++    /// last use is more than <see cref="AwayAfter"/> ago, or when it has never been recorded.
++    /// </summary>
++    public static string Effective(string? storedStatus, DateTime? lastSeenUtc, DateTime nowUtc)
++    {
++        var status = string.IsNullOrWhiteSpace(storedStatus) ? "Active" : storedStatus.Trim();
++        if (status == "Inactive")
++            return "Inactive";
++        if (status == "Away")
++            status = "Active";
++        if (lastSeenUtc == null)
++            return "Away";
++        return nowUtc - AsUtc(lastSeenUtc.Value) > AwayAfter ? "Away" : status;
++    }
++
++    /// <summary>
++    /// The last-seen time a presence report records. A report without a time counts as now; a
++    /// time in the future is cut back to now (a clock ahead of ours cannot make the member later
++    /// than now); and last seen never moves backwards.
++    /// </summary>
++    public static DateTime LastSeenFromReport(DateTime? reportedUtc, DateTime? recordedUtc, DateTime nowUtc)
++    {
++        var at = reportedUtc.HasValue ? AsUtc(reportedUtc.Value) : nowUtc;
++        if (at > nowUtc)
++            at = nowUtc;
++        if (recordedUtc.HasValue && at < AsUtc(recordedUtc.Value))
++            at = AsUtc(recordedUtc.Value);
++        return at;
++    }
++
++    /// <summary>Stored timestamps are UTC (timestamptz); a value without a zone is taken as UTC.</summary>
++    private static DateTime AsUtc(DateTime value) => value.Kind switch
++    {
++        DateTimeKind.Utc => value,
++        DateTimeKind.Local => value.ToUniversalTime(),
++        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
++    };
++}
+diff --git a/Controllers/AuthController.cs b/Controllers/AuthController.cs
+index 382f661..f952334 100644
+--- a/Controllers/AuthController.cs
++++ b/Controllers/AuthController.cs
+@@ -163,6 +163,10 @@ public class AuthController : ControllerBase
+             user.UpdatedAtUtc = DateTime.UtcNow;
+         }
+ 
++        // Signing in always starts the member as Active (until they sign out or go away).
++        user.ActiveStatus = "Active";
++        user.LastSeenUtc = DateTime.UtcNow;
++
+         await _db.SaveChangesAsync(cancellationToken);
+ 
+         var (token, expiresIn) = _jwt.CreateToken(user);
+diff --git a/Controllers/CompanionsController.cs b/Controllers/CompanionsController.cs
+index 61b18a3..05f0501 100644
+--- a/Controllers/CompanionsController.cs
++++ b/Controllers/CompanionsController.cs
+@@ -276,6 +276,8 @@ public class CompanionsController : ControllerBase
+         var mine = await ConnectedCompanionIds(myId, cancellationToken);
+         var theirs = await ConnectedCompanionIds(user.Id, cancellationToken);
+         var mutuals = mine.Intersect(theirs).Count();
++        // Presence as the requesting member sees it: Away after 15 minutes without use.
++        var presence = PresenceRules.Effective(user.ActiveStatus, user.LastSeenUtc, DateTime.UtcNow);
+ 
+         return new CompanionDto
+         {
+@@ -289,15 +291,16 @@ public class CompanionsController : ControllerBase
+             Country = user.Country?.Name ?? string.Empty,
+             City = user.City?.Name ?? string.Empty,
+             Profession = user.Profession ?? string.Empty,
+-            IsOnline = user.ActiveStatus == "Active",
++            IsOnline = presence == "Active",
+             MutualCompanionsCount = mutuals,
+             Status = row == null ? "none" : RelativeStatus(row, myId),
+             Bio = user.AboutMe,
+             AboutMe = user.AboutMe,
+             AboutMeDetailsJson = user.AboutMeDetailsJson,
+             IsProfileLocked = user.IsProfileLocked,
+-            ActiveStatus = user.ActiveStatus,
++            ActiveStatus = presence,
+             CustomStatusText = user.CustomStatusText,
++            LastSeenUtc = user.LastSeenUtc,
+             IsVerified = user.IsVerified,
+             ConnectedCompanionIds = theirs
+         };
+diff --git a/Controllers/PresenceController.cs b/Controllers/PresenceController.cs
+new file mode 100644
+index 0000000..3d7c3e1
+--- /dev/null
++++ b/Controllers/PresenceController.cs
+@@ -0,0 +1,63 @@
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.EntityFrameworkCore;
++using NeverBeen.API.Common;
++using NeverBeen.API.Data;
++using NeverBeen.API.Dtos;
++
++namespace NeverBeen.API.Controllers;
++
++/// <summary>
++/// Presence of the signed-in member: the website reports that they are using the community
++/// (POST /api/presence/heartbeat) and that they signed out (POST /api/presence/sign-out).
++/// Signing in is recorded by POST /api/auth/oauth/login. The rules are in
++/// <see cref="PresenceRules"/>: Away after 15 minutes without use, Inactive after sign-out.
++/// </summary>
++[ApiController]
++[Authorize]
++[Route("api/presence")]
++public class PresenceController : ControllerBase
++{
++    private readonly AppDbContext _db;
++
++    public PresenceController(AppDbContext db)
++    {
++        _db = db;
++    }
++
++    /// <summary>Records when the member last used the community. Never changes their chosen status.</summary>
++    [HttpPost("heartbeat")]
++    public async Task<ActionResult<PresenceDto>> Heartbeat([FromBody] PresenceHeartbeatRequest? request, CancellationToken cancellationToken)
++    {
++        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == User.GetUserId(), cancellationToken);
++        if (user == null)
++            return NotFound();
++
++        var lastSeen = PresenceRules.LastSeenFromReport(request?.LastActivityUtc, user.LastSeenUtc, DateTime.UtcNow);
++        if (user.LastSeenUtc != lastSeen)
++        {
++            user.LastSeenUtc = lastSeen;
++            await _db.SaveChangesAsync(cancellationToken);
++        }
++
++        return Ok(new PresenceDto { ActiveStatus = user.ActiveStatus, LastSeenUtc = user.LastSeenUtc });
++    }
++
++    /// <summary>
++    /// Signs the member out: their status becomes Inactive whatever it was, and the time they
++    /// signed out is kept as their last seen.
++    /// </summary>
++    [HttpPost("sign-out")]
++    public async Task<ActionResult<PresenceDto>> SignOut(CancellationToken cancellationToken)
++    {
++        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == User.GetUserId(), cancellationToken);
++        if (user == null)
++            return NotFound();
++
++        user.ActiveStatus = "Inactive";
++        user.LastSeenUtc = DateTime.UtcNow;
++        await _db.SaveChangesAsync(cancellationToken);
++
++        return Ok(new PresenceDto { ActiveStatus = user.ActiveStatus, LastSeenUtc = user.LastSeenUtc });
++    }
++}
+diff --git a/Controllers/ProfileController.cs b/Controllers/ProfileController.cs
+index b5a08a2..b1f884b 100644
+--- a/Controllers/ProfileController.cs
++++ b/Controllers/ProfileController.cs
+@@ -50,7 +50,11 @@ public class ProfileController : ControllerBase
+         if (requesterId != id && user.Settings?.PublicProfileEnabled == false)
+             return Forbid();
+ 
+-        return Ok(await BuildDtoAsync(user, cancellationToken));
++        var dto = await BuildDtoAsync(user, cancellationToken);
++        // Other members see the member's presence as it is now (Away after 15 minutes without use).
++        if (requesterId != id)
++            dto.ActiveStatus = PresenceRules.Effective(user.ActiveStatus, user.LastSeenUtc, DateTime.UtcNow);
++        return Ok(dto);
+     }
+ 
+     /// <summary>Updates editable details of the signed-in user. Omitted (null) fields keep their current value.</summary>
+@@ -125,10 +129,14 @@ public class ProfileController : ControllerBase
+                 ? null
+                 : request.AboutMeDetailsJson.Trim();
+         if (request.ActiveStatus != null)
++        {
+             user.ActiveStatus = string.IsNullOrWhiteSpace(request.ActiveStatus)
+                 ? "Active"
+                 : AppConstants.ActiveStatuses.First(a =>
+                     string.Equals(a, request.ActiveStatus.Trim(), StringComparison.OrdinalIgnoreCase));
++            // Choosing a status is a use of the community: the member is not Away because of it.
++            user.LastSeenUtc = DateTime.UtcNow;
++        }
+         if (request.CustomStatusText != null)
+             user.CustomStatusText = string.IsNullOrWhiteSpace(request.CustomStatusText)
+                 ? null
+diff --git a/Dtos/CompanionDtos.cs b/Dtos/CompanionDtos.cs
+index 3ee32e9..5c2637b 100644
+--- a/Dtos/CompanionDtos.cs
++++ b/Dtos/CompanionDtos.cs
+@@ -25,6 +25,9 @@ public class CompanionDto
+     public bool IsProfileLocked { get; set; }
+     public string? ActiveStatus { get; set; }
+     public string? CustomStatusText { get; set; }
++
++    /// <summary>When the traveler was last using the community (UTC); shown beside Away and Inactive.</summary>
++    public DateTime? LastSeenUtc { get; set; }
+     public bool IsVerified { get; set; }
+     public string? RelationshipStatus { get; set; }
+     public List<int>? ConnectedCompanionIds { get; set; }
+diff --git a/Dtos/JourneyDtos.cs b/Dtos/JourneyDtos.cs
+index 28d10fa..ee8f0ef 100644
+--- a/Dtos/JourneyDtos.cs
++++ b/Dtos/JourneyDtos.cs
+@@ -13,6 +13,13 @@ public class AuthorDto
+     public string? Country { get; set; }
+     public string? City { get; set; }
+     public bool IsVerified { get; set; }
++
++    /// <summary>Presence as other members see it (Active, Away, Inactive, Busy, Don't Disturb or Custom).</summary>
++    public string? ActiveStatus { get; set; }
++    public string? CustomStatusText { get; set; }
++
++    /// <summary>When the member was last using the community (UTC); shown beside Away and Inactive.</summary>
++    public DateTime? LastSeenUtc { get; set; }
+ }
+ 
+ /// <summary>Who may see a Journey post.</summary>
+diff --git a/Dtos/Mappers.cs b/Dtos/Mappers.cs
+index 2e87726..c301c15 100644
+--- a/Dtos/Mappers.cs
++++ b/Dtos/Mappers.cs
+@@ -1,3 +1,4 @@
++using NeverBeen.API.Common;
+ using NeverBeen.API.Entities;
+ 
+ namespace NeverBeen.API.Dtos;
+@@ -61,6 +62,7 @@ public static class ProfileMapper
+             AboutMeDetailsJson = user.AboutMeDetailsJson,
+             ActiveStatus = user.ActiveStatus,
+             CustomStatusText = user.CustomStatusText,
++            LastSeenUtc = user.LastSeenUtc,
+             CoverPhotoUrl = user.CoverPhotoData != null
+                 ? $"/api/profile/{user.Id}/cover"
+                 : user.CoverPhotoUrl,
+@@ -135,7 +137,11 @@ public static class AuthorMapper
+         Profession = u.Profession,
+         Country = u.Country?.Name,
+         City = u.City?.Name,
+-        IsVerified = u.IsVerified
++        IsVerified = u.IsVerified,
++        // Presence as other members see it: Away once the member has not been around for 15 minutes.
++        ActiveStatus = PresenceRules.Effective(u.ActiveStatus, u.LastSeenUtc, DateTime.UtcNow),
++        CustomStatusText = u.CustomStatusText,
++        LastSeenUtc = u.LastSeenUtc
+     };
+ }
+ 
+diff --git a/Dtos/PresenceDtos.cs b/Dtos/PresenceDtos.cs
+new file mode 100644
+index 0000000..39bdf21
+--- /dev/null
++++ b/Dtos/PresenceDtos.cs
+@@ -0,0 +1,24 @@
++namespace NeverBeen.API.Dtos;
++
++/// <summary>
++/// Sent by the website while the signed-in member is using the community (about once a minute,
++/// on their first input after a pause, and when they leave the page).
++/// </summary>
++public class PresenceHeartbeatRequest
++{
++    /// <summary>
++    /// When the member last used the community on the page (UTC). Omitted means now. The API
++    /// never records a time in the future or an earlier one than the last recorded use.
++    /// </summary>
++    public DateTime? LastActivityUtc { get; set; }
++}
++
++/// <summary>The member's presence after a presence call.</summary>
++public class PresenceDto
++{
++    /// <summary>The member's own stored status (Active, Busy, Don't Disturb, Inactive or Custom).</summary>
++    public string ActiveStatus { get; set; } = "Active";
++
++    /// <summary>When the member was last using the community (UTC).</summary>
++    public DateTime? LastSeenUtc { get; set; }
++}
+diff --git a/Dtos/ProfileDtos.cs b/Dtos/ProfileDtos.cs
+index 76ccec2..24db110 100644
+--- a/Dtos/ProfileDtos.cs
++++ b/Dtos/ProfileDtos.cs
+@@ -49,6 +49,9 @@ public class ProfileDto
+     /// <summary>Custom presence text used when <see cref="ActiveStatus"/> is "Custom".</summary>
+     public string? CustomStatusText { get; set; }
+ 
++    /// <summary>When the member was last using the community (UTC); shown beside Away and Inactive.</summary>
++    public DateTime? LastSeenUtc { get; set; }
++
+     /// <summary>Relative API URL of the uploaded cover photograph, or the stored cover URL.</summary>
+     public string? CoverPhotoUrl { get; set; }
+ 
+diff --git a/Entities/UserProfile.cs b/Entities/UserProfile.cs
+index b379242..ba3cfc7 100644
+--- a/Entities/UserProfile.cs
++++ b/Entities/UserProfile.cs
+@@ -108,6 +108,12 @@ public class UserProfile
+     [MaxLength(30)]
+     public string? CustomStatusText { get; set; }
+ 
++    /// <summary>
++    /// When the member was last using the community (presence heartbeat, status change, sign-in
++    /// or sign-out), in UTC. Null until it is first recorded. Away is shown after 15 minutes without use.
++    /// </summary>
++    public DateTime? LastSeenUtc { get; set; }
++
+     /// <summary>When true, non-connected travelers see a locked profile.</summary>
+     public bool IsProfileLocked { get; set; }
+ 

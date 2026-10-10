@@ -50,7 +50,11 @@ public class ProfileController : ControllerBase
         if (requesterId != id && user.Settings?.PublicProfileEnabled == false)
             return Forbid();
 
-        return Ok(await BuildDtoAsync(user, cancellationToken));
+        var dto = await BuildDtoAsync(user, cancellationToken);
+        // Other members see the member's presence as it is now (Away after 15 minutes without use).
+        if (requesterId != id)
+            dto.ActiveStatus = PresenceRules.Effective(user.ActiveStatus, user.LastSeenUtc, DateTime.UtcNow);
+        return Ok(dto);
     }
 
     /// <summary>Updates editable details of the signed-in user. Omitted (null) fields keep their current value.</summary>
@@ -125,10 +129,14 @@ public class ProfileController : ControllerBase
                 ? null
                 : request.AboutMeDetailsJson.Trim();
         if (request.ActiveStatus != null)
+        {
             user.ActiveStatus = string.IsNullOrWhiteSpace(request.ActiveStatus)
                 ? "Active"
                 : AppConstants.ActiveStatuses.First(a =>
                     string.Equals(a, request.ActiveStatus.Trim(), StringComparison.OrdinalIgnoreCase));
+            // Choosing a status is a use of the community: the member is not Away because of it.
+            user.LastSeenUtc = DateTime.UtcNow;
+        }
         if (request.CustomStatusText != null)
             user.CustomStatusText = string.IsNullOrWhiteSpace(request.CustomStatusText)
                 ? null

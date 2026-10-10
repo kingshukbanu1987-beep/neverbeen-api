@@ -1,0 +1,275 @@
+From 43d887f000965ab7420e684cbf703672670d9fc4 Mon Sep 17 00:00:00 2001
+From: Arena Agent <agent@arena.ai>
+Date: Sat, 10 Oct 2026 12:49:45 +0000
+Subject: [PATCH] Community: follow-driven Journey feed, exact device details,
+ per-message notifications
+
+- Journey feed: GET /api/journey now includes the posts of members the signed-in
+  member follows (public and companion-audience posts), so following B makes B's
+  posts appear in A's Journey feed.
+- Devices: LoginDevice stores the exact device model (Model) plus the
+  IP-geolocation details (Country, City, Locality, Latitude, Longitude);
+  POST /api/devices accepts them and GET /api/devices answers them. The
+  registration falls back to the request's trusted IP when the browser did not
+  report one.
+- Messenger: sending a 1:1 or Circle message writes one 'message' notification
+  for every other participant (Notifications page + header bell badge), keeping
+  the message preview short for the 500-char column.
+---
+ Controllers/CirclesController.cs  | 23 +++++++++++++++++++++++
+ Controllers/DevicesController.cs  | 31 ++++++++++++++++++++++++++++++-
+ Controllers/JourneyController.cs  | 11 +++++++++--
+ Controllers/MessagesController.cs | 20 ++++++++++++++++++++
+ Dtos/NotificationDtos.cs          | 12 ++++++++++++
+ Entities/CommunityNotification.cs |  9 +++++++++
+ Entities/LoginDevice.cs           | 22 ++++++++++++++++++++++
+ 7 files changed, 125 insertions(+), 3 deletions(-)
+
+diff --git a/Controllers/CirclesController.cs b/Controllers/CirclesController.cs
+index db84d42..84918b4 100644
+--- a/Controllers/CirclesController.cs
++++ b/Controllers/CirclesController.cs
+@@ -249,6 +249,29 @@ public class CirclesController : ControllerBase
+             ReplyToMessageId = request.ReplyToMessageId
+         };
+         _db.CircleMessages.Add(message);
++
++        // Requirement: every Circle message the member receives adds one notification
++        // (Notifications page + header bell badge) and one item to the chat icon.
++        var circle = await _db.Circles.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id, cancellationToken);
++        var otherMemberIds = await _db.CircleMembers.AsNoTracking()
++            .Where(m => m.CircleId == id && m.UserId != myId)
++            .Select(m => m.UserId)
++            .ToListAsync(cancellationToken);
++        foreach (var otherId in otherMemberIds)
++        {
++            _db.Notifications.Add(new CommunityNotification
++            {
++                UserId = otherId,
++                Type = NotificationTypes.Message,
++                FromUserId = myId,
++                Message = circle != null
++                    ? $"sent you a message in {circle.Name}: “{NotificationTypes.MessagePreview(message.Text)}”"
++                    : $"sent you a message: “{NotificationTypes.MessagePreview(message.Text)}”",
++                RequestId = id,
++                CreatedAtUtc = message.SentAtUtc
++            });
++        }
++
+         await _db.SaveChangesAsync(cancellationToken);
+ 
+         var me = await _db.Users.AsNoTracking().FirstAsync(u => u.Id == myId, cancellationToken);
+diff --git a/Controllers/DevicesController.cs b/Controllers/DevicesController.cs
+index d3d2b7a..5bbdf97 100644
+--- a/Controllers/DevicesController.cs
++++ b/Controllers/DevicesController.cs
+@@ -41,6 +41,12 @@ public class DevicesController : ControllerBase
+             IpAddress = d.IpAddress ?? string.Empty,
+             MacAddress = d.MacAddress ?? string.Empty,
+             Location = d.Location ?? string.Empty,
++            Model = d.Model,
++            Country = d.Country,
++            City = d.City,
++            Locality = d.Locality,
++            Latitude = d.Latitude,
++            Longitude = d.Longitude,
+             LastSeenUtc = d.LastSeenUtc,
+             IsCurrent = d.IsCurrent,
+             IsActive = d.IsActive,
+@@ -69,9 +75,17 @@ public class DevicesController : ControllerBase
+         device.Type = request.Type;
+         device.Os = request.Os;
+         device.Browser = request.Browser;
+-        device.IpAddress = request.IpAddress;
++        // The browser cannot see its own public IP, so the trusted request address
++        // is the fallback when the client did not report one itself.
++        device.IpAddress = string.IsNullOrWhiteSpace(request.IpAddress) ? RemoteIp() : request.IpAddress;
+         device.MacAddress = request.MacAddress;
+         device.Location = request.Location;
++        device.Model = request.Model;
++        device.Country = request.Country;
++        device.City = request.City;
++        device.Locality = request.Locality;
++        device.Latitude = request.Latitude;
++        device.Longitude = request.Longitude;
+         device.IsCurrent = request.IsCurrent;
+         device.LastSeenUtc = DateTime.UtcNow;
+         await _db.SaveChangesAsync(cancellationToken);
+@@ -86,6 +100,12 @@ public class DevicesController : ControllerBase
+             IpAddress = device.IpAddress ?? string.Empty,
+             MacAddress = device.MacAddress ?? string.Empty,
+             Location = device.Location ?? string.Empty,
++            Model = device.Model,
++            Country = device.Country,
++            City = device.City,
++            Locality = device.Locality,
++            Latitude = device.Latitude,
++            Longitude = device.Longitude,
+             LastSeenUtc = device.LastSeenUtc,
+             IsCurrent = device.IsCurrent,
+             IsActive = device.IsActive,
+@@ -123,4 +143,13 @@ public class DevicesController : ControllerBase
+         await _db.SaveChangesAsync(cancellationToken);
+         return NoContent();
+     }
++
++    /// <summary>The caller's public IP as this server sees it (behind a proxy the X-Forwarded-For chain).</summary>
++    private string RemoteIp()
++    {
++        var forwarded = Request.Headers["X-Forwarded-For"].FirstOrDefault();
++        if (!string.IsNullOrWhiteSpace(forwarded))
++            return forwarded.Split(',', StringSplitOptions.RemoveEmptyEntries)[0].Trim();
++        return HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
++    }
+ }
+diff --git a/Controllers/JourneyController.cs b/Controllers/JourneyController.cs
+index cf07827..bea0776 100644
+--- a/Controllers/JourneyController.cs
++++ b/Controllers/JourneyController.cs
+@@ -38,6 +38,12 @@ public class JourneyController : ControllerBase
+ 
+         var companionIds = await ConnectedCompanionIds(myId, cancellationToken);
+         var blockedIds = await BlockedIds(myId, cancellationToken);
++        // Requirement A: following a traveler pulls that traveler's posts into this
++        // member's Journey feed, so B's posts start appearing as soon as A follows B.
++        var followedIds = await _db.Follows.AsNoTracking()
++            .Where(f => f.FollowerId == myId)
++            .Select(f => f.FolloweeId)
++            .ToListAsync(cancellationToken);
+ 
+         var query = _db.JourneyPosts.AsNoTracking()
+             .Where(p => !_db.HiddenPosts.Any(h => h.UserId == myId && h.PostId == p.Id))
+@@ -53,13 +59,14 @@ public class JourneyController : ControllerBase
+             query = query.Where(p =>
+                 p.AuthorId == myId ||
+                 p.WallOwnerId == myId ||
+-                companionIds.Contains(p.AuthorId));
++                companionIds.Contains(p.AuthorId) ||
++                followedIds.Contains(p.AuthorId));
+         }
+ 
+         query = query.Where(p =>
+             p.AuthorId == myId ||
+             p.AudienceMode == JourneyPostAudience.Public ||
+-            (p.AudienceMode == JourneyPostAudience.Companions && companionIds.Contains(p.AuthorId)) ||
++            (p.AudienceMode == JourneyPostAudience.Companions && (companionIds.Contains(p.AuthorId) || followedIds.Contains(p.AuthorId))) ||
+             (p.AudienceMode == JourneyPostAudience.Custom &&
+                 _db.JourneyPostAudienceEntries.Any(a => a.PostId == p.Id && a.UserId == myId && a.Kind == "allow") &&
+                 !_db.JourneyPostAudienceEntries.Any(a => a.PostId == p.Id && a.UserId == myId && a.Kind == "deny")));
+diff --git a/Controllers/MessagesController.cs b/Controllers/MessagesController.cs
+index 86cdc13..9c106ab 100644
+--- a/Controllers/MessagesController.cs
++++ b/Controllers/MessagesController.cs
+@@ -191,6 +191,26 @@ public class MessagesController : ControllerBase
+             ReplyToMessageId = request.ReplyToMessageId
+         };
+         _db.ChatMessages.Add(message);
++
++        // Requirement: every message the member receives adds one notification
++        // (Notifications page + header bell badge) and one item to the chat icon.
++        var otherParticipantIds = await _db.ConversationParticipants.AsNoTracking()
++            .Where(p => p.ConversationId == id && p.UserId != myId)
++            .Select(p => p.UserId)
++            .ToListAsync(cancellationToken);
++        foreach (var otherId in otherParticipantIds)
++        {
++            _db.Notifications.Add(new CommunityNotification
++            {
++                UserId = otherId,
++                Type = NotificationTypes.Message,
++                FromUserId = myId,
++                Message = $"sent you a message: “{NotificationTypes.MessagePreview(message.Text)}”",
++                RequestId = id,
++                CreatedAtUtc = message.SentAtUtc
++            });
++        }
++
+         await _db.SaveChangesAsync(cancellationToken);
+ 
+         // Sending marks the thread read up to the new message.
+diff --git a/Dtos/NotificationDtos.cs b/Dtos/NotificationDtos.cs
+index 98ce11c..7399809 100644
+--- a/Dtos/NotificationDtos.cs
++++ b/Dtos/NotificationDtos.cs
+@@ -25,6 +25,12 @@ public class DeviceDto
+     public string IpAddress { get; set; } = string.Empty;
+     public string MacAddress { get; set; } = string.Empty;
+     public string Location { get; set; } = string.Empty;
++    public string? Model { get; set; }
++    public string? Country { get; set; }
++    public string? City { get; set; }
++    public string? Locality { get; set; }
++    public double? Latitude { get; set; }
++    public double? Longitude { get; set; }
+     public DateTime LastSeenUtc { get; set; }
+     public bool IsCurrent { get; set; }
+     public bool IsActive { get; set; }
+@@ -42,5 +48,11 @@ public class SaveDeviceRequest
+     public string? IpAddress { get; set; }
+     public string? MacAddress { get; set; }
+     public string? Location { get; set; }
++    public string? Model { get; set; }
++    public string? Country { get; set; }
++    public string? City { get; set; }
++    public string? Locality { get; set; }
++    public double? Latitude { get; set; }
++    public double? Longitude { get; set; }
+     public bool IsCurrent { get; set; }
+ }
+diff --git a/Entities/CommunityNotification.cs b/Entities/CommunityNotification.cs
+index b9e7d2e..12c8380 100644
+--- a/Entities/CommunityNotification.cs
++++ b/Entities/CommunityNotification.cs
+@@ -40,7 +40,16 @@ public static class NotificationTypes
+     public const string CompanionshipAccepted = "companionship_accepted";
+     public const string JourneyLike = "journey_like";
+     public const string JourneyComment = "journey_comment";
++    /// <summary>One per messenger message (1:1 or Circle) — drives the bell badge and the Notifications list.</summary>
++    public const string Message = "message";
+     public const string Followed = "followed";
+     public const string Tagged = "tagged";
+     public const string MessageBookReply = "messagebook_reply";
++
++    /// <summary>Notification text keeps the message preview short (column limit is 500 chars).</summary>
++    public static string MessagePreview(string text)
++    {
++        var clean = string.Join(' ', text.Split('\r', '\n', ' ', '\t', StringSplitOptions.RemoveEmptyEntries));
++        return clean.Length <= 120 ? clean : clean[..119] + "…";
++    }
+ }
+diff --git a/Entities/LoginDevice.cs b/Entities/LoginDevice.cs
+index 9c2bb75..0d38620 100644
+--- a/Entities/LoginDevice.cs
++++ b/Entities/LoginDevice.cs
+@@ -36,6 +36,28 @@ public class LoginDevice
+     [MaxLength(120)]
+     public string? Location { get; set; }
+ 
++    /// <summary>The exact device model the browser reported (e.g. "iPhone 15 Pro", "Google Pixel 8").</summary>
++    [MaxLength(120)]
++    public string? Model { get; set; }
++
++    /// <summary>IP-geolocation country (e.g. "India").</summary>
++    [MaxLength(100)]
++    public string? Country { get; set; }
++
++    /// <summary>IP-geolocation city (e.g. "Kolkata").</summary>
++    [MaxLength(120)]
++    public string? City { get; set; }
++
++    /// <summary>Finest area the geolocation answered (locality / suburb / region).</summary>
++    [MaxLength(120)]
++    public string? Locality { get; set; }
++
++    /// <summary>IP-geolocation latitude (WGS 84).</summary>
++    public double? Latitude { get; set; }
++
++    /// <summary>IP-geolocation longitude (WGS 84).</summary>
++    public double? Longitude { get; set; }
++
+     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+     public bool IsCurrent { get; set; }
+     public bool IsActive { get; set; } = true;
+-- 
+2.39.5
+

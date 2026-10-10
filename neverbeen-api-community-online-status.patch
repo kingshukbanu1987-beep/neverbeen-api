@@ -1,0 +1,53 @@
+diff --git a/Common/PresenceRules.cs b/Common/PresenceRules.cs
+index 0b2271b..7fb2161 100644
+--- a/Common/PresenceRules.cs
++++ b/Common/PresenceRules.cs
+@@ -6,7 +6,8 @@ namespace NeverBeen.API.Common;
+ ///  - signing out sets it to Inactive, whatever status the member had (PresenceController.SignOut);
+ ///  - a member who has not used the community for more than <see cref="AwayAfter"/> is Away.
+ ///    Away is automatic: it is never stored as a choice, and when the member uses the community
+-///    again the status they chose is shown again.
++///    again the status they chose is shown again;
++///  - every status except Inactive counts as online (<see cref="IsOnline"/>).
+ /// </summary>
+ public static class PresenceRules
+ {
+@@ -30,6 +31,15 @@ public static class PresenceRules
+         return nowUtc - AsUtc(lastSeenUtc.Value) > AwayAfter ? "Away" : status;
+     }
+ 
++    /// <summary>
++    /// Whether a member belongs in the community's "Online Now" / "Online Companions" lists:
++    /// every status except Inactive does — Active, Busy, Don't Disturb, Away and any Custom
++    /// status. Only Inactive, chosen by the member or set when they sign out, moves them to
++    /// "Offline Companions". The website applies the same rule to the statuses it is given, so
++    /// the two lists agree whatever the last heartbeat said.
++    /// </summary>
++    public static bool IsOnline(string effectiveStatus) => effectiveStatus != "Inactive";
++
+     /// <summary>
+     /// The last-seen time a presence report records. A report without a time counts as now; a
+     /// time in the future is cut back to now (a clock ahead of ours cannot make the member later
+diff --git a/Controllers/CompanionsController.cs b/Controllers/CompanionsController.cs
+index 05f0501..b0b8d56 100644
+--- a/Controllers/CompanionsController.cs
++++ b/Controllers/CompanionsController.cs
+@@ -278,6 +278,9 @@ public class CompanionsController : ControllerBase
+         var mutuals = mine.Intersect(theirs).Count();
+         // Presence as the requesting member sees it: Away after 15 minutes without use.
+         var presence = PresenceRules.Effective(user.ActiveStatus, user.LastSeenUtc, DateTime.UtcNow);
++        // Only Inactive is offline: Busy, Don't Disturb, Away and Custom members stay in
++        // "Online Now" (with the status the website shows beside their name).
++        var online = PresenceRules.IsOnline(presence);
+ 
+         return new CompanionDto
+         {
+@@ -291,7 +294,7 @@ public class CompanionsController : ControllerBase
+             Country = user.Country?.Name ?? string.Empty,
+             City = user.City?.Name ?? string.Empty,
+             Profession = user.Profession ?? string.Empty,
+-            IsOnline = presence == "Active",
++            IsOnline = online,
+             MutualCompanionsCount = mutuals,
+             Status = row == null ? "none" : RelativeStatus(row, myId),
+             Bio = user.AboutMe,

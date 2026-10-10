@@ -6,7 +6,8 @@ namespace NeverBeen.API.Common;
 ///  - signing out sets it to Inactive, whatever status the member had (PresenceController.SignOut);
 ///  - a member who has not used the community for more than <see cref="AwayAfter"/> is Away.
 ///    Away is automatic: it is never stored as a choice, and when the member uses the community
-///    again the status they chose is shown again.
+///    again the status they chose is shown again;
+///  - every status except Inactive counts as online (<see cref="IsOnline"/>).
 /// </summary>
 public static class PresenceRules
 {
@@ -29,6 +30,15 @@ public static class PresenceRules
             return "Away";
         return nowUtc - AsUtc(lastSeenUtc.Value) > AwayAfter ? "Away" : status;
     }
+
+    /// <summary>
+    /// Whether a member belongs in the community's "Online Now" / "Online Companions" lists:
+    /// every status except Inactive does — Active, Busy, Don't Disturb, Away and any Custom
+    /// status. Only Inactive, chosen by the member or set when they sign out, moves them to
+    /// "Offline Companions". The website applies the same rule to the statuses it is given, so
+    /// the two lists agree whatever the last heartbeat said.
+    /// </summary>
+    public static bool IsOnline(string effectiveStatus) => effectiveStatus != "Inactive";
 
     /// <summary>
     /// The last-seen time a presence report records. A report without a time counts as now; a

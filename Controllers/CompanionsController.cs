@@ -278,6 +278,9 @@ public class CompanionsController : ControllerBase
         var mutuals = mine.Intersect(theirs).Count();
         // Presence as the requesting member sees it: Away after 15 minutes without use.
         var presence = PresenceRules.Effective(user.ActiveStatus, user.LastSeenUtc, DateTime.UtcNow);
+        // Only Inactive is offline: Busy, Don't Disturb, Away and Custom members stay in
+        // "Online Now" (with the status the website shows beside their name).
+        var online = PresenceRules.IsOnline(presence);
 
         return new CompanionDto
         {
@@ -291,7 +294,7 @@ public class CompanionsController : ControllerBase
             Country = user.Country?.Name ?? string.Empty,
             City = user.City?.Name ?? string.Empty,
             Profession = user.Profession ?? string.Empty,
-            IsOnline = presence == "Active",
+            IsOnline = online,
             MutualCompanionsCount = mutuals,
             Status = row == null ? "none" : RelativeStatus(row, myId),
             Bio = user.AboutMe,

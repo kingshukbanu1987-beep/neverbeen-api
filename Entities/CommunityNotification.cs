@@ -49,7 +49,7 @@ public static class NotificationTypes
     /// <summary>Notification text keeps the message preview short (column limit is 500 chars).</summary>
     public static string MessagePreview(string text)
     {
-        var clean = string.Join(' ', text.Split('\r', '\n', ' ', '\t', StringSplitOptions.RemoveEmptyEntries));
+        var clean = string.Join(' ', text.Split(new[] { '\r', '\n', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries));
         return clean.Length <= 120 ? clean : clean[..119] + "…";
     }
 }

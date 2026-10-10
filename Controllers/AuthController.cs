@@ -163,6 +163,10 @@ public class AuthController : ControllerBase
             user.UpdatedAtUtc = DateTime.UtcNow;
         }
 
+        // Signing in always starts the member as Active (until they sign out or go away).
+        user.ActiveStatus = "Active";
+        user.LastSeenUtc = DateTime.UtcNow;
+
         await _db.SaveChangesAsync(cancellationToken);
 
         var (token, expiresIn) = _jwt.CreateToken(user);

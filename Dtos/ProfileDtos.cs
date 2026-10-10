@@ -49,6 +49,9 @@ public class ProfileDto
     /// <summary>Custom presence text used when <see cref="ActiveStatus"/> is "Custom".</summary>
     public string? CustomStatusText { get; set; }
 
+    /// <summary>When the member was last using the community (UTC); shown beside Away and Inactive.</summary>
+    public DateTime? LastSeenUtc { get; set; }
+
     /// <summary>Relative API URL of the uploaded cover photograph, or the stored cover URL.</summary>
     public string? CoverPhotoUrl { get; set; }
 

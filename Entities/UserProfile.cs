@@ -108,6 +108,12 @@ public class UserProfile
     [MaxLength(30)]
     public string? CustomStatusText { get; set; }
 
+    /// <summary>
+    /// When the member was last using the community (presence heartbeat, status change, sign-in
+    /// or sign-out), in UTC. Null until it is first recorded. Away is shown after 15 minutes without use.
+    /// </summary>
+    public DateTime? LastSeenUtc { get; set; }
+
     /// <summary>When true, non-connected travelers see a locked profile.</summary>
     public bool IsProfileLocked { get; set; }
 

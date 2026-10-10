@@ -13,6 +13,13 @@ public class AuthorDto
     public string? Country { get; set; }
     public string? City { get; set; }
     public bool IsVerified { get; set; }
+
+    /// <summary>Presence as other members see it (Active, Away, Inactive, Busy, Don't Disturb or Custom).</summary>
+    public string? ActiveStatus { get; set; }
+    public string? CustomStatusText { get; set; }
+
+    /// <summary>When the member was last using the community (UTC); shown beside Away and Inactive.</summary>
+    public DateTime? LastSeenUtc { get; set; }
 }
 
 /// <summary>Who may see a Journey post.</summary>

@@ -276,6 +276,8 @@ public class CompanionsController : ControllerBase
         var mine = await ConnectedCompanionIds(myId, cancellationToken);
         var theirs = await ConnectedCompanionIds(user.Id, cancellationToken);
         var mutuals = mine.Intersect(theirs).Count();
+        // Presence as the requesting member sees it: Away after 15 minutes without use.
+        var presence = PresenceRules.Effective(user.ActiveStatus, user.LastSeenUtc, DateTime.UtcNow);
 
         return new CompanionDto
         {
@@ -289,15 +291,16 @@ public class CompanionsController : ControllerBase
             Country = user.Country?.Name ?? string.Empty,
             City = user.City?.Name ?? string.Empty,
             Profession = user.Profession ?? string.Empty,
-            IsOnline = user.ActiveStatus == "Active",
+            IsOnline = presence == "Active",
             MutualCompanionsCount = mutuals,
             Status = row == null ? "none" : RelativeStatus(row, myId),
             Bio = user.AboutMe,
             AboutMe = user.AboutMe,
             AboutMeDetailsJson = user.AboutMeDetailsJson,
             IsProfileLocked = user.IsProfileLocked,
-            ActiveStatus = user.ActiveStatus,
+            ActiveStatus = presence,
             CustomStatusText = user.CustomStatusText,
+            LastSeenUtc = user.LastSeenUtc,
             IsVerified = user.IsVerified,
             ConnectedCompanionIds = theirs
         };

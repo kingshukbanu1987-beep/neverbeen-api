@@ -1,3 +1,4 @@
+using NeverBeen.API.Common;
 using NeverBeen.API.Entities;
 
 namespace NeverBeen.API.Dtos;
@@ -61,6 +62,7 @@ public static class ProfileMapper
             AboutMeDetailsJson = user.AboutMeDetailsJson,
             ActiveStatus = user.ActiveStatus,
             CustomStatusText = user.CustomStatusText,
+            LastSeenUtc = user.LastSeenUtc,
             CoverPhotoUrl = user.CoverPhotoData != null
                 ? $"/api/profile/{user.Id}/cover"
                 : user.CoverPhotoUrl,
@@ -135,7 +137,11 @@ public static class AuthorMapper
         Profession = u.Profession,
         Country = u.Country?.Name,
         City = u.City?.Name,
-        IsVerified = u.IsVerified
+        IsVerified = u.IsVerified,
+        // Presence as other members see it: Away once the member has not been around for 15 minutes.
+        ActiveStatus = PresenceRules.Effective(u.ActiveStatus, u.LastSeenUtc, DateTime.UtcNow),
+        CustomStatusText = u.CustomStatusText,
+        LastSeenUtc = u.LastSeenUtc
     };
 }
 

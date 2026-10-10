@@ -25,6 +25,9 @@ public class CompanionDto
     public bool IsProfileLocked { get; set; }
     public string? ActiveStatus { get; set; }
     public string? CustomStatusText { get; set; }
+
+    /// <summary>When the traveler was last using the community (UTC); shown beside Away and Inactive.</summary>
+    public DateTime? LastSeenUtc { get; set; }
     public bool IsVerified { get; set; }
     public string? RelationshipStatus { get; set; }
     public List<int>? ConnectedCompanionIds { get; set; }

@@ -249,6 +249,29 @@ public class CirclesController : ControllerBase
             ReplyToMessageId = request.ReplyToMessageId
         };
         _db.CircleMessages.Add(message);
+
+        // Requirement: every Circle message the member receives adds one notification
+        // (Notifications page + header bell badge) and one item to the chat icon.
+        var circle = await _db.Circles.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id, cancellationToken);
+        var otherMemberIds = await _db.CircleMembers.AsNoTracking()
+            .Where(m => m.CircleId == id && m.UserId != myId)
+            .Select(m => m.UserId)
+            .ToListAsync(cancellationToken);
+        foreach (var otherId in otherMemberIds)
+        {
+            _db.Notifications.Add(new CommunityNotification
+            {
+                UserId = otherId,
+                Type = NotificationTypes.Message,
+                FromUserId = myId,
+                Message = circle != null
+                    ? $"sent you a message in {circle.Name}: “{NotificationTypes.MessagePreview(message.Text)}”"
+                    : $"sent you a message: “{NotificationTypes.MessagePreview(message.Text)}”",
+                RequestId = id,
+                CreatedAtUtc = message.SentAtUtc
+            });
+        }
+
         await _db.SaveChangesAsync(cancellationToken);
 
         var me = await _db.Users.AsNoTracking().FirstAsync(u => u.Id == myId, cancellationToken);

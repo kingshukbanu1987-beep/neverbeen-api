@@ -41,6 +41,12 @@ public class DevicesController : ControllerBase
             IpAddress = d.IpAddress ?? string.Empty,
             MacAddress = d.MacAddress ?? string.Empty,
             Location = d.Location ?? string.Empty,
+            Model = d.Model,
+            Country = d.Country,
+            City = d.City,
+            Locality = d.Locality,
+            Latitude = d.Latitude,
+            Longitude = d.Longitude,
             LastSeenUtc = d.LastSeenUtc,
             IsCurrent = d.IsCurrent,
             IsActive = d.IsActive,
@@ -69,9 +75,17 @@ public class DevicesController : ControllerBase
         device.Type = request.Type;
         device.Os = request.Os;
         device.Browser = request.Browser;
-        device.IpAddress = request.IpAddress;
+        // The browser cannot see its own public IP, so the trusted request address
+        // is the fallback when the client did not report one itself.
+        device.IpAddress = string.IsNullOrWhiteSpace(request.IpAddress) ? RemoteIp() : request.IpAddress;
         device.MacAddress = request.MacAddress;
         device.Location = request.Location;
+        device.Model = request.Model;
+        device.Country = request.Country;
+        device.City = request.City;
+        device.Locality = request.Locality;
+        device.Latitude = request.Latitude;
+        device.Longitude = request.Longitude;
         device.IsCurrent = request.IsCurrent;
         device.LastSeenUtc = DateTime.UtcNow;
         await _db.SaveChangesAsync(cancellationToken);
@@ -86,6 +100,12 @@ public class DevicesController : ControllerBase
             IpAddress = device.IpAddress ?? string.Empty,
             MacAddress = device.MacAddress ?? string.Empty,
             Location = device.Location ?? string.Empty,
+            Model = device.Model,
+            Country = device.Country,
+            City = device.City,
+            Locality = device.Locality,
+            Latitude = device.Latitude,
+            Longitude = device.Longitude,
             LastSeenUtc = device.LastSeenUtc,
             IsCurrent = device.IsCurrent,
             IsActive = device.IsActive,
@@ -122,5 +142,14 @@ public class DevicesController : ControllerBase
         device.IsActive = !blocked;
         await _db.SaveChangesAsync(cancellationToken);
         return NoContent();
+    }
+
+    /// <summary>The caller's public IP as this server sees it (behind a proxy the X-Forwarded-For chain).</summary>
+    private string RemoteIp()
+    {
+        var forwarded = Request.Headers["X-Forwarded-For"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(forwarded))
+            return forwarded.Split(',', StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+        return HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
     }
 }

@@ -25,6 +25,12 @@ public class DeviceDto
     public string IpAddress { get; set; } = string.Empty;
     public string MacAddress { get; set; } = string.Empty;
     public string Location { get; set; } = string.Empty;
+    public string? Model { get; set; }
+    public string? Country { get; set; }
+    public string? City { get; set; }
+    public string? Locality { get; set; }
+    public double? Latitude { get; set; }
+    public double? Longitude { get; set; }
     public DateTime LastSeenUtc { get; set; }
     public bool IsCurrent { get; set; }
     public bool IsActive { get; set; }
@@ -42,5 +48,11 @@ public class SaveDeviceRequest
     public string? IpAddress { get; set; }
     public string? MacAddress { get; set; }
     public string? Location { get; set; }
+    public string? Model { get; set; }
+    public string? Country { get; set; }
+    public string? City { get; set; }
+    public string? Locality { get; set; }
+    public double? Latitude { get; set; }
+    public double? Longitude { get; set; }
     public bool IsCurrent { get; set; }
 }

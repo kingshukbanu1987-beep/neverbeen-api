@@ -38,6 +38,12 @@ public class JourneyController : ControllerBase
 
         var companionIds = await ConnectedCompanionIds(myId, cancellationToken);
         var blockedIds = await BlockedIds(myId, cancellationToken);
+        // Requirement A: following a traveler pulls that traveler's posts into this
+        // member's Journey feed, so B's posts start appearing as soon as A follows B.
+        var followedIds = await _db.Follows.AsNoTracking()
+            .Where(f => f.FollowerId == myId)
+            .Select(f => f.FolloweeId)
+            .ToListAsync(cancellationToken);
 
         var query = _db.JourneyPosts.AsNoTracking()
             .Where(p => !_db.HiddenPosts.Any(h => h.UserId == myId && h.PostId == p.Id))
@@ -53,13 +59,14 @@ public class JourneyController : ControllerBase
             query = query.Where(p =>
                 p.AuthorId == myId ||
                 p.WallOwnerId == myId ||
-                companionIds.Contains(p.AuthorId));
+                companionIds.Contains(p.AuthorId) ||
+                followedIds.Contains(p.AuthorId));
         }
 
         query = query.Where(p =>
             p.AuthorId == myId ||
             p.AudienceMode == JourneyPostAudience.Public ||
-            (p.AudienceMode == JourneyPostAudience.Companions && companionIds.Contains(p.AuthorId)) ||
+            (p.AudienceMode == JourneyPostAudience.Companions && (companionIds.Contains(p.AuthorId) || followedIds.Contains(p.AuthorId))) ||
             (p.AudienceMode == JourneyPostAudience.Custom &&
                 _db.JourneyPostAudienceEntries.Any(a => a.PostId == p.Id && a.UserId == myId && a.Kind == "allow") &&
                 !_db.JourneyPostAudienceEntries.Any(a => a.PostId == p.Id && a.UserId == myId && a.Kind == "deny")));

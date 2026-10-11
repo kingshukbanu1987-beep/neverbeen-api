@@ -24,6 +24,10 @@ public class AppDbContext : DbContext
     // --- Message Book -----------------------------------------------------
     public DbSet<CommunityComment> CommunityComments => Set<CommunityComment>();
     public DbSet<ModelTestimonial> ModelTestimonials => Set<ModelTestimonial>();
+    public DbSet<ModelMediaView> ModelMediaViews => Set<ModelMediaView>();
+    public DbSet<ModelMediaShare> ModelMediaShares => Set<ModelMediaShare>();
+    public DbSet<ModelMediaLike> ModelMediaLikes => Set<ModelMediaLike>();
+    public DbSet<ModelMediaComment> ModelMediaComments => Set<ModelMediaComment>();
     public DbSet<CommunityCommentTag> CommunityCommentTags => Set<CommunityCommentTag>();
     public DbSet<CommentReaction> CommentReactions => Set<CommentReaction>();
 
@@ -176,6 +180,62 @@ public class AppDbContext : DbContext
                 table.HasCheckConstraint(
                     "CK_ModelTestimonials_ModelSlug",
                     "\"ModelSlug\" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'");
+            });
+        });
+
+        modelBuilder.Entity<ModelMediaView>(entity =>
+        {
+            entity.HasIndex(v => new { v.ModelSlug, v.MediaKey });
+            entity.HasIndex(v => new { v.ModelSlug, v.MediaKey, v.ViewerId });
+            entity.HasIndex(v => new { v.ModelSlug, v.MediaKey, v.VisitorToken });
+
+            entity.HasOne(v => v.Viewer)
+                .WithMany()
+                .HasForeignKey(v => v.ViewerId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<ModelMediaShare>(entity =>
+        {
+            entity.HasIndex(s => new { s.ModelSlug, s.MediaKey });
+            entity.HasIndex(s => new { s.ModelSlug, s.MediaKey, s.ViewerId });
+            entity.HasIndex(s => new { s.ModelSlug, s.MediaKey, s.VisitorToken });
+
+            entity.HasOne(s => s.Viewer)
+                .WithMany()
+                .HasForeignKey(s => s.ViewerId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<ModelMediaLike>(entity =>
+        {
+            entity.HasIndex(l => new { l.ModelSlug, l.MediaKey, l.UserId }).IsUnique();
+            entity.HasIndex(l => new { l.ModelSlug, l.MediaKey });
+
+            entity.HasOne(l => l.User)
+                .WithMany()
+                .HasForeignKey(l => l.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ModelMediaComment>(entity =>
+        {
+            entity.HasIndex(c => new { c.ModelSlug, c.MediaKey, c.CreatedAtUtc });
+            entity.HasIndex(c => c.AuthorId);
+
+            entity.HasOne(c => c.Author)
+                .WithMany()
+                .HasForeignKey(c => c.AuthorId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_ModelMediaComments_TextLength",
+                    "char_length(btrim(\"Text\")) BETWEEN 1 AND 1000");
+                table.HasCheckConstraint(
+                    "CK_ModelMediaComments_MediaType",
+                    "\"MediaType\" IN ('photo', 'video')");
             });
         });
 

@@ -1,0 +1,687 @@
+diff --git a/Controllers/ModelMediaEngagementController.cs b/Controllers/ModelMediaEngagementController.cs
+new file mode 100644
+index 0000000..d34f740
+--- /dev/null
++++ b/Controllers/ModelMediaEngagementController.cs
+@@ -0,0 +1,398 @@
++using System.Security.Claims;
++using System.Text.RegularExpressions;
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.EntityFrameworkCore;
++using NeverBeen.API.Common;
++using NeverBeen.API.Data;
++using NeverBeen.API.Dtos;
++using NeverBeen.API.Entities;
++
++namespace NeverBeen.API.Controllers;
++
++/// <summary>
++/// Engagement (seen, likes, comments, share) on each photograph and clip inside AI model portfolios.
++///
++/// Seen and share counts never require authentication — each visitor (signed-in member or guest
++/// token) is counted once per media.
++///
++/// Likes and comments require an active Community session. Reading comments is public so every
++/// visitor exploring a portfolio can see the conversation.
++/// </summary>
++[ApiController]
++[Route("api/models/{modelSlug}/media")]
++public class ModelMediaEngagementController : ControllerBase
++{
++    private const int MaximumPageSize = 100;
++    private static readonly Regex ModelSlugPattern = new(
++        "^[a-z0-9]+(?:-[a-z0-9]+)*$",
++        RegexOptions.Compiled | RegexOptions.CultureInvariant);
++
++    private readonly AppDbContext _db;
++
++    public ModelMediaEngagementController(AppDbContext db)
++    {
++        _db = db;
++    }
++
++    /// <summary>Returns every media's seen, like, comment, and share count for this portfolio.</summary>
++    [HttpGet("stats")]
++    [ProducesResponseType(typeof(List<ModelMediaStatDto>), StatusCodes.Status200OK)]
++    public async Task<ActionResult<List<ModelMediaStatDto>>> GetStats(
++        [FromRoute] string modelSlug,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        var viewerId = await ResolveViewerIdAsync(cancellationToken);
++
++        var views = await _db.ModelMediaViews
++            .AsNoTracking()
++            .Where(v => v.ModelSlug == modelSlug)
++            .GroupBy(v => new { v.MediaKey, v.MediaType })
++            .Select(g => new { g.Key.MediaKey, g.Key.MediaType, Count = g.Count() })
++            .ToListAsync(cancellationToken);
++
++        var likes = await _db.ModelMediaLikes
++            .AsNoTracking()
++            .Where(l => l.ModelSlug == modelSlug)
++            .GroupBy(l => new { l.MediaKey, l.MediaType })
++            .Select(g => new { g.Key.MediaKey, g.Key.MediaType, Count = g.Count() })
++            .ToListAsync(cancellationToken);
++
++        var comments = await _db.ModelMediaComments
++            .AsNoTracking()
++            .Where(c => c.ModelSlug == modelSlug)
++            .GroupBy(c => new { c.MediaKey, c.MediaType })
++            .Select(g => new { g.Key.MediaKey, g.Key.MediaType, Count = g.Count() })
++            .ToListAsync(cancellationToken);
++
++        var shares = await _db.ModelMediaShares
++            .AsNoTracking()
++            .Where(s => s.ModelSlug == modelSlug)
++            .GroupBy(s => new { s.MediaKey, s.MediaType })
++            .Select(g => new { g.Key.MediaKey, g.Key.MediaType, Count = g.Count() })
++            .ToListAsync(cancellationToken);
++
++        var myLikes = viewerId.HasValue
++            ? await _db.ModelMediaLikes
++                .AsNoTracking()
++                .Where(l => l.ModelSlug == modelSlug && l.UserId == viewerId.Value)
++                .Select(l => l.MediaKey)
++                .ToListAsync(cancellationToken)
++            : new List<string>();
++
++        var keys = views.Select(v => new { v.MediaKey, v.MediaType })
++            .Union(likes.Select(l => new { l.MediaKey, l.MediaType }))
++            .Union(comments.Select(c => new { c.MediaKey, c.MediaType }))
++            .Union(shares.Select(s => new { s.MediaKey, s.MediaType }))
++            .Distinct()
++            .ToList();
++
++        var viewMap = views.ToDictionary(v => (v.MediaKey, v.MediaType), v => v.Count);
++        var likeMap = likes.ToDictionary(l => (l.MediaKey, l.MediaType), l => l.Count);
++        var commentMap = comments.ToDictionary(c => (c.MediaKey, c.MediaType), c => c.Count);
++        var shareMap = shares.ToDictionary(s => (s.MediaKey, s.MediaType), s => s.Count);
++        var myLikeSet = new HashSet<string>(myLikes);
++
++        var result = keys.Select(k => new ModelMediaStatDto
++        {
++            MediaKey = k.MediaKey,
++            MediaType = k.MediaType,
++            SeenCount = viewMap.TryGetValue((k.MediaKey, k.MediaType), out var vc) ? vc : 0,
++            LikeCount = likeMap.TryGetValue((k.MediaKey, k.MediaType), out var lc) ? lc : 0,
++            CommentCount = commentMap.TryGetValue((k.MediaKey, k.MediaType), out var cc) ? cc : 0,
++            ShareCount = shareMap.TryGetValue((k.MediaKey, k.MediaType), out var sc) ? sc : 0,
++            LikedByMe = myLikeSet.Contains(k.MediaKey)
++        }).ToList();
++
++        return Ok(result);
++    }
++
++    /// <summary>Records a view event, deduped per visitor (member or guest token).</summary>
++    [HttpPost("view")]
++    [ProducesResponseType(typeof(ModelMediaViewResponse), StatusCodes.Status200OK)]
++    public async Task<ActionResult<ModelMediaViewResponse>> RecordView(
++        [FromRoute] string modelSlug,
++        [FromBody] RecordModelMediaEventRequest request,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        var mediaKey = request.MediaKey?.Trim() ?? string.Empty;
++        var mediaType = request.MediaType?.Trim().ToLowerInvariant() ?? string.Empty;
++        if (string.IsNullOrEmpty(mediaKey) || (mediaType != "photo" && mediaType != "video"))
++            return BadRequest(new { error = "A valid mediaKey and mediaType (photo|video) are required." });
++
++        var viewerId = await ResolveViewerIdAsync(cancellationToken);
++        var visitorToken = string.IsNullOrWhiteSpace(request.ViewerToken) ? null : request.ViewerToken.Trim();
++
++        bool alreadySeen;
++        if (viewerId.HasValue)
++        {
++            alreadySeen = await _db.ModelMediaViews.AnyAsync(
++                v => v.ModelSlug == modelSlug && v.MediaKey == mediaKey && v.ViewerId == viewerId.Value,
++                cancellationToken);
++        }
++        else if (!string.IsNullOrEmpty(visitorToken))
++        {
++            alreadySeen = await _db.ModelMediaViews.AnyAsync(
++                v => v.ModelSlug == modelSlug && v.MediaKey == mediaKey && v.VisitorToken == visitorToken,
++                cancellationToken);
++        }
++        else
++        {
++            alreadySeen = false;
++        }
++
++        if (!alreadySeen)
++        {
++            _db.ModelMediaViews.Add(new ModelMediaView
++            {
++                ModelSlug = modelSlug,
++                MediaType = mediaType,
++                MediaKey = mediaKey,
++                ViewerId = viewerId,
++                VisitorToken = visitorToken,
++                CreatedAtUtc = DateTime.UtcNow
++            });
++            await _db.SaveChangesAsync(cancellationToken);
++        }
++
++        var total = await _db.ModelMediaViews.CountAsync(
++            v => v.ModelSlug == modelSlug && v.MediaKey == mediaKey,
++            cancellationToken);
++
++        return Ok(new ModelMediaViewResponse { SeenCount = total });
++    }
++
++    /// <summary>Records a share event, deduped per visitor.</summary>
++    [HttpPost("share")]
++    [ProducesResponseType(typeof(ModelMediaShareResponse), StatusCodes.Status200OK)]
++    public async Task<ActionResult<ModelMediaShareResponse>> RecordShare(
++        [FromRoute] string modelSlug,
++        [FromBody] RecordModelMediaEventRequest request,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        var mediaKey = request.MediaKey?.Trim() ?? string.Empty;
++        var mediaType = request.MediaType?.Trim().ToLowerInvariant() ?? string.Empty;
++        if (string.IsNullOrEmpty(mediaKey) || (mediaType != "photo" && mediaType != "video"))
++            return BadRequest(new { error = "A valid mediaKey and mediaType (photo|video) are required." });
++
++        var viewerId = await ResolveViewerIdAsync(cancellationToken);
++        var visitorToken = string.IsNullOrWhiteSpace(request.ViewerToken) ? null : request.ViewerToken.Trim();
++
++        bool alreadyShared;
++        if (viewerId.HasValue)
++        {
++            alreadyShared = await _db.ModelMediaShares.AnyAsync(
++                s => s.ModelSlug == modelSlug && s.MediaKey == mediaKey && s.ViewerId == viewerId.Value,
++                cancellationToken);
++        }
++        else if (!string.IsNullOrEmpty(visitorToken))
++        {
++            alreadyShared = await _db.ModelMediaShares.AnyAsync(
++                s => s.ModelSlug == modelSlug && s.MediaKey == mediaKey && s.VisitorToken == visitorToken,
++                cancellationToken);
++        }
++        else
++        {
++            alreadyShared = false;
++        }
++
++        if (!alreadyShared)
++        {
++            _db.ModelMediaShares.Add(new ModelMediaShare
++            {
++                ModelSlug = modelSlug,
++                MediaType = mediaType,
++                MediaKey = mediaKey,
++                ViewerId = viewerId,
++                VisitorToken = visitorToken,
++                CreatedAtUtc = DateTime.UtcNow
++            });
++            await _db.SaveChangesAsync(cancellationToken);
++        }
++
++        var total = await _db.ModelMediaShares.CountAsync(
++            s => s.ModelSlug == modelSlug && s.MediaKey == mediaKey,
++            cancellationToken);
++
++        return Ok(new ModelMediaShareResponse { ShareCount = total });
++    }
++
++    /// <summary>Toggles a member's like on one photograph or clip.</summary>
++    [Authorize]
++    [HttpPost("like")]
++    [ProducesResponseType(typeof(ModelMediaLikeResponse), StatusCodes.Status200OK)]
++    public async Task<ActionResult<ModelMediaLikeResponse>> ToggleLike(
++        [FromRoute] string modelSlug,
++        [FromBody] ToggleModelMediaLikeRequest request,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        var mediaKey = request.MediaKey?.Trim() ?? string.Empty;
++        var mediaType = request.MediaType?.Trim().ToLowerInvariant() ?? string.Empty;
++        if (string.IsNullOrEmpty(mediaKey) || (mediaType != "photo" && mediaType != "video"))
++            return BadRequest(new { error = "A valid mediaKey and mediaType (photo|video) are required." });
++
++        var userId = User.GetUserId();
++        var existing = await _db.ModelMediaLikes.FirstOrDefaultAsync(
++            l => l.ModelSlug == modelSlug && l.MediaKey == mediaKey && l.UserId == userId,
++            cancellationToken);
++
++        bool likedByMe;
++        if (existing != null)
++        {
++            _db.ModelMediaLikes.Remove(existing);
++            likedByMe = false;
++        }
++        else
++        {
++            _db.ModelMediaLikes.Add(new ModelMediaLike
++            {
++                ModelSlug = modelSlug,
++                MediaType = mediaType,
++                MediaKey = mediaKey,
++                UserId = userId,
++                CreatedAtUtc = DateTime.UtcNow
++            });
++            likedByMe = true;
++        }
++
++        await _db.SaveChangesAsync(cancellationToken);
++
++        var total = await _db.ModelMediaLikes.CountAsync(
++            l => l.ModelSlug == modelSlug && l.MediaKey == mediaKey,
++            cancellationToken);
++
++        return Ok(new ModelMediaLikeResponse { LikedByMe = likedByMe, LikeCount = total });
++    }
++
++    /// <summary>Returns a page of comments for one photograph or clip, newest first.</summary>
++    [HttpGet("comments")]
++    [ProducesResponseType(typeof(PagedResult<ModelMediaCommentDto>), StatusCodes.Status200OK)]
++    public async Task<ActionResult<PagedResult<ModelMediaCommentDto>>> ListComments(
++        [FromRoute] string modelSlug,
++        [FromQuery] string mediaKey,
++        [FromQuery] string mediaType = "photo",
++        [FromQuery] int page = 1,
++        [FromQuery] int pageSize = 50,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        mediaKey = mediaKey?.Trim() ?? string.Empty;
++        if (string.IsNullOrEmpty(mediaKey))
++            return BadRequest(new { error = "mediaKey is required." });
++
++        if (page < 1) page = 1;
++        if (pageSize < 1) pageSize = 50;
++        if (pageSize > MaximumPageSize) pageSize = MaximumPageSize;
++
++        var query = _db.ModelMediaComments
++            .AsNoTracking()
++            .Where(c => c.ModelSlug == modelSlug && c.MediaKey == mediaKey)
++            .Include(c => c.Author)
++                .ThenInclude(author => author!.Country)
++            .Include(c => c.Author)
++                .ThenInclude(author => author!.City);
++
++        var totalCount = await query.CountAsync(cancellationToken);
++        var items = await query
++            .OrderByDescending(c => c.CreatedAtUtc)
++            .ThenByDescending(c => c.Id)
++            .Skip((page - 1) * pageSize)
++            .Take(pageSize)
++            .ToListAsync(cancellationToken);
++
++        return Ok(new PagedResult<ModelMediaCommentDto>
++        {
++            Items = items.Select(ToCommentDto).ToList(),
++            TotalCount = totalCount,
++            Page = page,
++            PageSize = pageSize,
++            TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize)
++        });
++    }
++
++    /// <summary>Posts a comment on a photograph or clip as the signed-in active Community member.</summary>
++    [Authorize]
++    [HttpPost("comments")]
++    [ProducesResponseType(typeof(ModelMediaCommentDto), StatusCodes.Status201Created)]
++    public async Task<ActionResult<ModelMediaCommentDto>> CreateComment(
++        [FromRoute] string modelSlug,
++        [FromBody] CreateModelMediaCommentRequest request,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        var mediaKey = request.MediaKey?.Trim() ?? string.Empty;
++        var mediaType = request.MediaType?.Trim().ToLowerInvariant() ?? string.Empty;
++        var text = request.Text?.Trim() ?? string.Empty;
++
++        if (string.IsNullOrEmpty(mediaKey) || (mediaType != "photo" && mediaType != "video"))
++            return BadRequest(new { error = "A valid mediaKey and mediaType (photo|video) are required." });
++        if (text.Length is < 1 or > 1000)
++            return BadRequest(new { error = "A comment must contain between 1 and 1,000 characters." });
++
++        var author = await _db.Users
++            .Include(user => user.Country)
++            .Include(user => user.City)
++            .FirstOrDefaultAsync(user => user.Id == User.GetUserId(), cancellationToken);
++        if (author == null || !string.Equals(author.Status, UserProfileStatus.Active, StringComparison.OrdinalIgnoreCase))
++            return Forbid();
++
++        var comment = new ModelMediaComment
++        {
++            ModelSlug = modelSlug,
++            MediaType = mediaType,
++            MediaKey = mediaKey,
++            AuthorId = author.Id,
++            Author = author,
++            Text = text,
++            CreatedAtUtc = DateTime.UtcNow
++        };
++
++        _db.ModelMediaComments.Add(comment);
++        await _db.SaveChangesAsync(cancellationToken);
++
++        var response = ToCommentDto(comment);
++        return CreatedAtAction(
++            nameof(ListComments),
++            new { modelSlug, mediaKey = comment.MediaKey, page = 1, pageSize = 50 },
++            response);
++    }
++
++    private async Task<int?> ResolveViewerIdAsync(CancellationToken cancellationToken)
++    {
++        if (User?.Identity?.IsAuthenticated != true) return null;
++        var raw = User.FindFirstValue(ClaimTypes.NameIdentifier);
++        if (!int.TryParse(raw, out var userId)) return null;
++        return await _db.Users.AnyAsync(user => user.Id == userId, cancellationToken) ? userId : null;
++    }
++
++    private static bool IsValidModelSlug(string? modelSlug) =>
++        !string.IsNullOrWhiteSpace(modelSlug) &&
++        modelSlug.Length <= 120 &&
++        ModelSlugPattern.IsMatch(modelSlug);
++
++    private static ModelMediaCommentDto ToCommentDto(ModelMediaComment comment) => new()
++    {
++        Id = comment.Id,
++        MediaKey = comment.MediaKey,
++        MediaType = comment.MediaType,
++        Text = comment.Text,
++        CreatedAtUtc = comment.CreatedAtUtc,
++        Author = comment.Author == null ? new AuthorDto() : AuthorMapper.From(comment.Author)
++    };
++}
+diff --git a/Data/AppDbContext.cs b/Data/AppDbContext.cs
+index 56be20c..b172be8 100644
+--- a/Data/AppDbContext.cs
++++ b/Data/AppDbContext.cs
+@@ -24,6 +24,10 @@ public class AppDbContext : DbContext
+     // --- Message Book -----------------------------------------------------
+     public DbSet<CommunityComment> CommunityComments => Set<CommunityComment>();
+     public DbSet<ModelTestimonial> ModelTestimonials => Set<ModelTestimonial>();
++    public DbSet<ModelMediaView> ModelMediaViews => Set<ModelMediaView>();
++    public DbSet<ModelMediaShare> ModelMediaShares => Set<ModelMediaShare>();
++    public DbSet<ModelMediaLike> ModelMediaLikes => Set<ModelMediaLike>();
++    public DbSet<ModelMediaComment> ModelMediaComments => Set<ModelMediaComment>();
+     public DbSet<CommunityCommentTag> CommunityCommentTags => Set<CommunityCommentTag>();
+     public DbSet<CommentReaction> CommentReactions => Set<CommentReaction>();
+ 
+@@ -179,6 +183,62 @@ public class AppDbContext : DbContext
+             });
+         });
+ 
++        modelBuilder.Entity<ModelMediaView>(entity =>
++        {
++            entity.HasIndex(v => new { v.ModelSlug, v.MediaKey });
++            entity.HasIndex(v => new { v.ModelSlug, v.MediaKey, v.ViewerId });
++            entity.HasIndex(v => new { v.ModelSlug, v.MediaKey, v.VisitorToken });
++
++            entity.HasOne(v => v.Viewer)
++                .WithMany()
++                .HasForeignKey(v => v.ViewerId)
++                .OnDelete(DeleteBehavior.SetNull);
++        });
++
++        modelBuilder.Entity<ModelMediaShare>(entity =>
++        {
++            entity.HasIndex(s => new { s.ModelSlug, s.MediaKey });
++            entity.HasIndex(s => new { s.ModelSlug, s.MediaKey, s.ViewerId });
++            entity.HasIndex(s => new { s.ModelSlug, s.MediaKey, s.VisitorToken });
++
++            entity.HasOne(s => s.Viewer)
++                .WithMany()
++                .HasForeignKey(s => s.ViewerId)
++                .OnDelete(DeleteBehavior.SetNull);
++        });
++
++        modelBuilder.Entity<ModelMediaLike>(entity =>
++        {
++            entity.HasIndex(l => new { l.ModelSlug, l.MediaKey, l.UserId }).IsUnique();
++            entity.HasIndex(l => new { l.ModelSlug, l.MediaKey });
++
++            entity.HasOne(l => l.User)
++                .WithMany()
++                .HasForeignKey(l => l.UserId)
++                .OnDelete(DeleteBehavior.Cascade);
++        });
++
++        modelBuilder.Entity<ModelMediaComment>(entity =>
++        {
++            entity.HasIndex(c => new { c.ModelSlug, c.MediaKey, c.CreatedAtUtc });
++            entity.HasIndex(c => c.AuthorId);
++
++            entity.HasOne(c => c.Author)
++                .WithMany()
++                .HasForeignKey(c => c.AuthorId)
++                .OnDelete(DeleteBehavior.Cascade);
++
++            entity.ToTable(table =>
++            {
++                table.HasCheckConstraint(
++                    "CK_ModelMediaComments_TextLength",
++                    "char_length(btrim(\"Text\")) BETWEEN 1 AND 1000");
++                table.HasCheckConstraint(
++                    "CK_ModelMediaComments_MediaType",
++                    "\"MediaType\" IN ('photo', 'video')");
++            });
++        });
++
+         modelBuilder.Entity<CommunityCommentTag>(entity =>
+         {
+             entity.HasIndex(t => new { t.CommentId, t.UserId }).IsUnique();
+diff --git a/Dtos/ModelMediaEngagementDtos.cs b/Dtos/ModelMediaEngagementDtos.cs
+new file mode 100644
+index 0000000..bfbd94c
+--- /dev/null
++++ b/Dtos/ModelMediaEngagementDtos.cs
+@@ -0,0 +1,88 @@
++using System.ComponentModel.DataAnnotations;
++
++namespace NeverBeen.API.Dtos;
++
++/// <summary>Per-media counters returned by GET /api/models/{modelSlug}/media/stats.</summary>
++public class ModelMediaStatDto
++{
++    public string MediaKey { get; set; } = string.Empty;
++    public string MediaType { get; set; } = string.Empty;
++    public int SeenCount { get; set; }
++    public int LikeCount { get; set; }
++    public int CommentCount { get; set; }
++    public int ShareCount { get; set; }
++    public bool LikedByMe { get; set; }
++}
++
++/// <summary>Request body for POST /api/models/{modelSlug}/media/view and /share.</summary>
++public class RecordModelMediaEventRequest
++{
++    [Required]
++    [StringLength(512, MinimumLength = 1)]
++    public string MediaKey { get; set; } = string.Empty;
++
++    [Required]
++    [RegularExpression("^(photo|video)$")]
++    public string MediaType { get; set; } = "photo";
++
++    [StringLength(64)]
++    public string? ViewerToken { get; set; }
++}
++
++/// <summary>Response from POST /api/models/{modelSlug}/media/view.</summary>
++public class ModelMediaViewResponse
++{
++    public int SeenCount { get; set; }
++}
++
++/// <summary>Response from POST /api/models/{modelSlug}/media/share.</summary>
++public class ModelMediaShareResponse
++{
++    public int ShareCount { get; set; }
++}
++
++/// <summary>Request body for POST /api/models/{modelSlug}/media/like.</summary>
++public class ToggleModelMediaLikeRequest
++{
++    [Required]
++    [StringLength(512, MinimumLength = 1)]
++    public string MediaKey { get; set; } = string.Empty;
++
++    [Required]
++    [RegularExpression("^(photo|video)$")]
++    public string MediaType { get; set; } = "photo";
++}
++
++/// <summary>Response from POST /api/models/{modelSlug}/media/like.</summary>
++public class ModelMediaLikeResponse
++{
++    public bool LikedByMe { get; set; }
++    public int LikeCount { get; set; }
++}
++
++/// <summary>Request body for POST /api/models/{modelSlug}/media/comments.</summary>
++public class CreateModelMediaCommentRequest
++{
++    [Required]
++    [StringLength(512, MinimumLength = 1)]
++    public string MediaKey { get; set; } = string.Empty;
++
++    [Required]
++    [RegularExpression("^(photo|video)$")]
++    public string MediaType { get; set; } = "photo";
++
++    [Required]
++    [StringLength(1000, MinimumLength = 1)]
++    public string Text { get; set; } = string.Empty;
++}
++
++/// <summary>A single comment on a photograph or clip.</summary>
++public class ModelMediaCommentDto
++{
++    public long Id { get; set; }
++    public string MediaKey { get; set; } = string.Empty;
++    public string MediaType { get; set; } = string.Empty;
++    public string Text { get; set; } = string.Empty;
++    public DateTime CreatedAtUtc { get; set; }
++    public AuthorDto Author { get; set; } = new();
++}
+diff --git a/Entities/ModelMediaEngagement.cs b/Entities/ModelMediaEngagement.cs
+new file mode 100644
+index 0000000..dfc9e67
+--- /dev/null
++++ b/Entities/ModelMediaEngagement.cs
+@@ -0,0 +1,105 @@
++using System.ComponentModel.DataAnnotations;
++using System.ComponentModel.DataAnnotations.Schema;
++
++namespace NeverBeen.API.Entities;
++
++/// <summary>
++/// A single view of a photograph or clip inside an AI model portfolio, counted once per visitor.
++/// </summary>
++[Table("ModelMediaViews")]
++public class ModelMediaView
++{
++    public long Id { get; set; }
++
++    [MaxLength(120)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    [MaxLength(16)]
++    public string MediaType { get; set; } = string.Empty;
++
++    [MaxLength(512)]
++    public string MediaKey { get; set; } = string.Empty;
++
++    public int? ViewerId { get; set; }
++    public UserProfile? Viewer { get; set; }
++
++    [MaxLength(64)]
++    public string? VisitorToken { get; set; }
++
++    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
++}
++
++/// <summary>
++/// A share event of a photograph or clip, counted once per visitor.
++/// </summary>
++[Table("ModelMediaShares")]
++public class ModelMediaShare
++{
++    public long Id { get; set; }
++
++    [MaxLength(120)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    [MaxLength(16)]
++    public string MediaType { get; set; } = string.Empty;
++
++    [MaxLength(512)]
++    public string MediaKey { get; set; } = string.Empty;
++
++    public int? ViewerId { get; set; }
++    public UserProfile? Viewer { get; set; }
++
++    [MaxLength(64)]
++    public string? VisitorToken { get; set; }
++
++    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
++}
++
++/// <summary>
++/// A member's like on a photograph or clip in an AI model portfolio.
++/// </summary>
++[Table("ModelMediaLikes")]
++public class ModelMediaLike
++{
++    public long Id { get; set; }
++
++    [MaxLength(120)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    [MaxLength(16)]
++    public string MediaType { get; set; } = string.Empty;
++
++    [MaxLength(512)]
++    public string MediaKey { get; set; } = string.Empty;
++
++    public int UserId { get; set; }
++    public UserProfile? User { get; set; }
++
++    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
++}
++
++/// <summary>
++/// A comment posted by a signed-in Community member on a portfolio photograph or clip.
++/// </summary>
++[Table("ModelMediaComments")]
++public class ModelMediaComment
++{
++    public long Id { get; set; }
++
++    [MaxLength(120)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    [MaxLength(16)]
++    public string MediaType { get; set; } = string.Empty;
++
++    [MaxLength(512)]
++    public string MediaKey { get; set; } = string.Empty;
++
++    public int AuthorId { get; set; }
++    public UserProfile? Author { get; set; }
++
++    [MaxLength(1000)]
++    public string Text { get; set; } = string.Empty;
++
++    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
++}

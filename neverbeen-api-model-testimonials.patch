@@ -1,0 +1,250 @@
+diff --git a/Controllers/ModelTestimonialsController.cs b/Controllers/ModelTestimonialsController.cs
+new file mode 100644
+index 0000000..aa8bab4
+--- /dev/null
++++ b/Controllers/ModelTestimonialsController.cs
+@@ -0,0 +1,135 @@
++using System.Text.RegularExpressions;
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.EntityFrameworkCore;
++using NeverBeen.API.Common;
++using NeverBeen.API.Data;
++using NeverBeen.API.Dtos;
++using NeverBeen.API.Entities;
++
++namespace NeverBeen.API.Controllers;
++
++/// <summary>
++/// Public testimonials for each AI model portfolio. Reading is public; creating a testimonial
++/// requires a completed, active NeverBeen Community account.
++/// </summary>
++[ApiController]
++[Route("api/models/{modelSlug}/testimonials")]
++public class ModelTestimonialsController : ControllerBase
++{
++    private const int MaximumPageSize = 100;
++    private static readonly Regex ModelSlugPattern = new(
++        "^[a-z0-9]+(?:-[a-z0-9]+)*$",
++        RegexOptions.Compiled | RegexOptions.CultureInvariant);
++
++    private readonly AppDbContext _db;
++
++    public ModelTestimonialsController(AppDbContext db)
++    {
++        _db = db;
++    }
++
++    /// <summary>Returns a page of testimonials, newest first. This endpoint is public.</summary>
++    [HttpGet]
++    [ProducesResponseType(typeof(PagedResult<ModelTestimonialDto>), StatusCodes.Status200OK)]
++    public async Task<ActionResult<PagedResult<ModelTestimonialDto>>> List(
++        [FromRoute] string modelSlug,
++        [FromQuery] int page = 1,
++        [FromQuery] int pageSize = 50,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        if (page < 1) page = 1;
++        if (pageSize < 1) pageSize = 50;
++        if (pageSize > MaximumPageSize) pageSize = MaximumPageSize;
++
++        var query = _db.ModelTestimonials
++            .AsNoTracking()
++            .Where(testimonial => testimonial.ModelSlug == modelSlug)
++            .Include(testimonial => testimonial.Author)
++                .ThenInclude(author => author!.Country)
++            .Include(testimonial => testimonial.Author)
++                .ThenInclude(author => author!.City);
++
++        var totalCount = await query.CountAsync(cancellationToken);
++        var items = await query
++            .OrderByDescending(testimonial => testimonial.CreatedAtUtc)
++            .ThenByDescending(testimonial => testimonial.Id)
++            .Skip((page - 1) * pageSize)
++            .Take(pageSize)
++            .ToListAsync(cancellationToken);
++
++        return Ok(new PagedResult<ModelTestimonialDto>
++        {
++            Items = items.Select(ToDto).ToList(),
++            TotalCount = totalCount,
++            Page = page,
++            PageSize = pageSize,
++            TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize)
++        });
++    }
++
++    /// <summary>Creates a half-star-step testimonial as the signed-in active Community member.</summary>
++    [Authorize]
++    [HttpPost]
++    [ProducesResponseType(typeof(ModelTestimonialDto), StatusCodes.Status201Created)]
++    public async Task<ActionResult<ModelTestimonialDto>> Create(
++        [FromRoute] string modelSlug,
++        [FromBody] CreateModelTestimonialRequest request,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        var headline = request.Headline?.Trim() ?? string.Empty;
++        var text = request.Text?.Trim() ?? string.Empty;
++        if (headline.Length is < 10 or > 100)
++            return BadRequest(new { error = "A headline must contain between 10 and 100 characters." });
++        if (text.Length is < 20 or > 2500)
++            return BadRequest(new { error = "A testimonial must contain between 20 and 2,500 characters." });
++        if (request.Rating < 0.5m || request.Rating > 5m || (request.Rating * 2m) % 1m != 0m)
++            return BadRequest(new { error = "A rating must be from 0.5 to 5 stars in half-star steps." });
++
++        var author = await _db.Users
++            .Include(user => user.Country)
++            .Include(user => user.City)
++            .FirstOrDefaultAsync(user => user.Id == User.GetUserId(), cancellationToken);
++        if (author == null || !string.Equals(author.Status, UserProfileStatus.Active, StringComparison.OrdinalIgnoreCase))
++            return Forbid();
++
++        var testimonial = new ModelTestimonial
++        {
++            ModelSlug = modelSlug,
++            Headline = headline,
++            Text = text,
++            Rating = request.Rating,
++            AuthorId = author.Id,
++            Author = author,
++            CreatedAtUtc = DateTime.UtcNow
++        };
++
++        _db.ModelTestimonials.Add(testimonial);
++        await _db.SaveChangesAsync(cancellationToken);
++
++        var response = ToDto(testimonial);
++        return CreatedAtAction(nameof(List), new { modelSlug, page = 1, pageSize = 50 }, response);
++    }
++
++    private static bool IsValidModelSlug(string? modelSlug) =>
++        !string.IsNullOrWhiteSpace(modelSlug) &&
++        modelSlug.Length <= 120 &&
++        ModelSlugPattern.IsMatch(modelSlug);
++
++    private static ModelTestimonialDto ToDto(ModelTestimonial testimonial) => new()
++    {
++        Id = testimonial.Id,
++        ModelSlug = testimonial.ModelSlug,
++        Headline = testimonial.Headline,
++        Text = testimonial.Text,
++        Rating = testimonial.Rating,
++        CreatedAtUtc = testimonial.CreatedAtUtc,
++        Author = testimonial.Author == null ? new AuthorDto() : AuthorMapper.From(testimonial.Author)
++    };
++}
+diff --git a/Data/AppDbContext.cs b/Data/AppDbContext.cs
+index f5913be..8fa97f9 100644
+--- a/Data/AppDbContext.cs
++++ b/Data/AppDbContext.cs
+@@ -25,2 +25,3 @@ public class AppDbContext : DbContext
+     public DbSet<CommunityComment> CommunityComments => Set<CommunityComment>();
++    public DbSet<ModelTestimonial> ModelTestimonials => Set<ModelTestimonial>();
+     public DbSet<CommunityCommentTag> CommunityCommentTags => Set<CommunityCommentTag>();
+@@ -149,1 +149,29 @@ public class AppDbContext : DbContext
++        modelBuilder.Entity<ModelTestimonial>(entity =>
++        {
++            entity.HasIndex(t => new { t.ModelSlug, t.CreatedAtUtc });
++            entity.HasIndex(t => t.AuthorId);
++            entity.Property(t => t.Rating).HasColumnType("numeric(2,1)");
++
++            entity.HasOne(t => t.Author)
++                .WithMany()
++                .HasForeignKey(t => t.AuthorId)
++                .OnDelete(DeleteBehavior.Cascade);
++
++            entity.ToTable(table =>
++            {
++                table.HasCheckConstraint(
++                    "CK_ModelTestimonials_HeadlineLength",
++                    "char_length(btrim(\"Headline\")) BETWEEN 10 AND 100");
++                table.HasCheckConstraint(
++                    "CK_ModelTestimonials_TextLength",
++                    "char_length(btrim(\"Text\")) BETWEEN 20 AND 2500");
++                table.HasCheckConstraint(
++                    "CK_ModelTestimonials_Rating",
++                    "\"Rating\" >= 0.5 AND \"Rating\" <= 5 AND mod(\"Rating\" * 2, 1) = 0");
++                table.HasCheckConstraint(
++                    "CK_ModelTestimonials_ModelSlug",
++                    "\"ModelSlug\" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'");
++            });
++        });
++
+         modelBuilder.Entity<CommunityCommentTag>(entity =>
+diff --git a/Dtos/ModelTestimonialDtos.cs b/Dtos/ModelTestimonialDtos.cs
+new file mode 100644
+index 0000000..14b27ba
+--- /dev/null
++++ b/Dtos/ModelTestimonialDtos.cs
+@@ -0,0 +1,30 @@
++using System.ComponentModel.DataAnnotations;
++
++namespace NeverBeen.API.Dtos;
++
++/// <summary>Body of POST /api/models/{modelSlug}/testimonials.</summary>
++public class CreateModelTestimonialRequest
++{
++    [Required]
++    [StringLength(100, MinimumLength = 10)]
++    public string Headline { get; set; } = string.Empty;
++
++    [Required]
++    [StringLength(2500, MinimumLength = 20)]
++    public string Text { get; set; } = string.Empty;
++
++    [Range(typeof(decimal), "0.5", "5.0")]
++    public decimal Rating { get; set; }
++}
++
++/// <summary>A model testimonial with the Community author card displayed on the website.</summary>
++public class ModelTestimonialDto
++{
++    public int Id { get; set; }
++    public string ModelSlug { get; set; } = string.Empty;
++    public string Headline { get; set; } = string.Empty;
++    public string Text { get; set; } = string.Empty;
++    public decimal Rating { get; set; }
++    public DateTime CreatedAtUtc { get; set; }
++    public AuthorDto Author { get; set; } = new();
++}
+diff --git a/Entities/ModelTestimonial.cs b/Entities/ModelTestimonial.cs
+new file mode 100644
+index 0000000..f1ed763
+--- /dev/null
++++ b/Entities/ModelTestimonial.cs
+@@ -0,0 +1,29 @@
++using System.ComponentModel.DataAnnotations;
++using System.ComponentModel.DataAnnotations.Schema;
++
++namespace NeverBeen.API.Entities;
++
++/// <summary>A Community member's public rating and testimonial for an AI model portfolio.</summary>
++[Table("ModelTestimonials")]
++public class ModelTestimonial
++{
++    public int Id { get; set; }
++
++    /// <summary>Stable URL slug of the model portfolio (the model catalog is managed by the website).</summary>
++    [MaxLength(120)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    [MaxLength(100)]
++    public string Headline { get; set; } = string.Empty;
++
++    [MaxLength(2500)]
++    public string Text { get; set; } = string.Empty;
++
++    [Column(TypeName = "numeric(2,1)")]
++    public decimal Rating { get; set; }
++
++    public int AuthorId { get; set; }
++    public UserProfile? Author { get; set; }
++
++    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
++}

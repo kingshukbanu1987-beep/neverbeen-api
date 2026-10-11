@@ -23,6 +23,7 @@ public class AppDbContext : DbContext
 
     // --- Message Book -----------------------------------------------------
     public DbSet<CommunityComment> CommunityComments => Set<CommunityComment>();
+    public DbSet<ModelTestimonial> ModelTestimonials => Set<ModelTestimonial>();
     public DbSet<CommunityCommentTag> CommunityCommentTags => Set<CommunityCommentTag>();
     public DbSet<CommentReaction> CommentReactions => Set<CommentReaction>();
 
@@ -144,6 +145,34 @@ public class AppDbContext : DbContext
                 .WithMany(c => c.Replies)
                 .HasForeignKey(c => c.ParentId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<ModelTestimonial>(entity =>
+        {
+            entity.HasIndex(t => new { t.ModelSlug, t.CreatedAtUtc });
+            entity.HasIndex(t => t.AuthorId);
+            entity.Property(t => t.Rating).HasColumnType("numeric(2,1)");
+
+            entity.HasOne(t => t.Author)
+                .WithMany()
+                .HasForeignKey(t => t.AuthorId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_ModelTestimonials_HeadlineLength",
+                    "char_length(btrim(\"Headline\")) BETWEEN 10 AND 100");
+                table.HasCheckConstraint(
+                    "CK_ModelTestimonials_TextLength",
+                    "char_length(btrim(\"Text\")) BETWEEN 20 AND 2500");
+                table.HasCheckConstraint(
+                    "CK_ModelTestimonials_Rating",
+                    "\"Rating\" >= 0.5 AND \"Rating\" <= 5 AND mod(\"Rating\" * 2, 1) = 0");
+                table.HasCheckConstraint(
+                    "CK_ModelTestimonials_ModelSlug",
+                    "\"ModelSlug\" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'");
+            });
         });
 
         modelBuilder.Entity<CommunityCommentTag>(entity =>

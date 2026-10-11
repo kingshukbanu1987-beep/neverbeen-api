@@ -138,3 +138,16 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
     created post carries its tagged companions without extra round trips.
   - `POST /api/messagebook` accepts `imageUrl` and `CommentDto` answers it, so message
     book entries with an attached photograph are stored and re-served.
+- **AI model advertisement (website ↔ API).** The Community Home shows a NeverBeen AI
+  Models advertisement — a right-rail panel below “Online Companions” (15 random
+  portfolios) and sponsored cards inside the Journey feed (four photographs of one model
+  when her folder holds them, otherwise one). The website renders it from its own catalog
+  (`data/ai-models/profiles.json`) and uses the API only to steer and measure it:
+  - `GET /api/models/ads` (public) answers the advertising pool — `ModelSlug`,
+    `DisplayName`, `IsActive`, `Weight` (1–10) and the impression / click totals. A model
+    missing from the pool is advertised with weight 1; a row with `IsActive = false`
+    pauses her.
+  - `POST /api/models/ads/events` (public, ≤ 50 events per call) records `impression` /
+    `click` events per `rail` / `feed` surface and increments the pool totals in the same
+    transaction. `ViewerId` is filled for signed-in members and stays null for guests.
+  - Tables and the 42-model starting pool ship with `neverbeen-database/schema.sql`.

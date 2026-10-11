@@ -27,6 +27,10 @@ public class AppDbContext : DbContext
     public DbSet<CommunityCommentTag> CommunityCommentTags => Set<CommunityCommentTag>();
     public DbSet<CommentReaction> CommentReactions => Set<CommentReaction>();
 
+    // --- AI model advertisement (right rail + Journey feed on the website) --
+    public DbSet<ModelAd> ModelAds => Set<ModelAd>();
+    public DbSet<ModelAdEvent> ModelAdEvents => Set<ModelAdEvent>();
+
     // --- Journey feed -----------------------------------------------------
     public DbSet<JourneyPost> JourneyPosts => Set<JourneyPost>();
     public DbSet<JourneyPostAudienceEntry> JourneyPostAudienceEntries => Set<JourneyPostAudienceEntry>();
@@ -293,6 +297,25 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<HiddenPost>(entity =>
         {
             entity.HasIndex(h => new { h.UserId, h.PostId }).IsUnique();
+        });
+
+        modelBuilder.Entity<ModelAd>(entity =>
+        {
+            entity.HasIndex(ad => ad.ModelSlug).IsUnique();
+            entity.HasIndex(ad => new { ad.IsActive, ad.Weight });
+            entity.Property(ad => ad.Weight).HasDefaultValue(1);
+        });
+
+        modelBuilder.Entity<ModelAdEvent>(entity =>
+        {
+            entity.HasIndex(e => new { e.ModelSlug, e.CreatedAtUtc });
+            entity.HasIndex(e => new { e.Surface, e.CreatedAtUtc });
+            entity.HasIndex(e => e.ViewerId);
+
+            entity.HasOne(e => e.Viewer)
+                .WithMany()
+                .HasForeignKey(e => e.ViewerId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
     }
 }

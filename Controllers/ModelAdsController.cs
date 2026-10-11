@@ -30,8 +30,8 @@ public class ModelAdsController : ControllerBase
         "^[a-z0-9]+(?:-[a-z0-9]+)*$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private static readonly string[] EventTypes = ["impression", "click"];
-    private static readonly string[] Surfaces = ["rail", "feed"];
+    private static readonly string[] EventTypes = { "impression", "click" };
+    private static readonly string[] Surfaces = { "rail", "feed" };
 
     private readonly AppDbContext _db;
 

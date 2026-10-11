@@ -34,62 +34,15 @@ public class MessagesController : ControllerBase
 
         var conversations = await _db.Conversations.AsNoTracking()
             .Where(c => myConversations.Contains(c.Id))
-            .OrderByDescending(c => c.CreatedAtUtc)
             .ToListAsync(cancellationToken);
 
-        var ids = conversations.Select(c => c.Id).ToList();
-        var participants = await _db.ConversationParticipants.AsNoTracking()
-            .Where(p => ids.Contains(p.ConversationId))
-            .ToListAsync(cancellationToken);
-        var byConversation = participants.GroupBy(p => p.ConversationId).ToDictionary(g => g.Key, g => g.ToList());
-
-        var userIds = participants.Select(p => p.UserId).Distinct().ToList();
-        var users = await _db.Users.AsNoTracking()
-            .Include(u => u.Country).Include(u => u.City)
-            .Where(u => userIds.Contains(u.Id))
-            .ToDictionaryAsync(u => u.Id, cancellationToken);
-
-        var lastMessages = new Dictionary<long, ChatMessage>();
-        foreach (var id in ids)
-        {
-            var last = await _db.ChatMessages.AsNoTracking()
-                .Where(m => m.ConversationId == id)
-                .OrderByDescending(m => m.SentAtUtc)
-                .FirstOrDefaultAsync(cancellationToken);
-            if (last != null)
-                lastMessages[id] = last;
-        }
-
-        var result = new List<ConversationDto>();
-        foreach (var conversation in conversations)
-        {
-            byConversation.TryGetValue(conversation.Id, out var rows);
-            rows ??= new List<ConversationParticipant>();
-
-            var unread = 0;
-            var me = rows.FirstOrDefault(p => p.UserId == myId);
-            if (me?.LastReadMessageId != null)
-                unread = await _db.ChatMessages.CountAsync(m => m.ConversationId == conversation.Id && m.Id > me.LastReadMessageId!.Value, cancellationToken);
-            else if (me != null)
-                unread = await _db.ChatMessages.CountAsync(m => m.ConversationId == conversation.Id, cancellationToken);
-
-            lastMessages.TryGetValue(conversation.Id, out var last);
-            result.Add(new ConversationDto
-            {
-                Id = conversation.Id,
-                IsGroup = conversation.IsGroup,
-                CircleId = conversation.CircleId,
-                OwnerId = conversation.OwnerId,
-                CreatedAtUtc = conversation.CreatedAtUtc,
-                UnreadCount = unread,
-                Participants = rows
-                    .Where(p => users.ContainsKey(p.UserId))
-                    .Select(p => AuthorMapper.From(users[p.UserId]))
-                    .ToList(),
-                LastMessage = last == null ? null : await ToMessageDto(last, myId, rows, users, cancellationToken)
-            });
-        }
-        return Ok(result);
+        // Newest activity first (last message, or creation for a chat nobody has written in yet):
+        // the website's Messenger page lists every previous and current chat in this order.
+        var result = await BuildConversationDtos(conversations, myId, cancellationToken);
+        return Ok(result
+            .OrderByDescending(c => c.LastActivityUtc)
+            .ThenByDescending(c => c.Id)
+            .ToList());
     }
 
     /// <summary>Starts (or reopens) a 1:1 conversation with a companion / a group chat.</summary>
@@ -277,6 +230,11 @@ public class MessagesController : ControllerBase
 
     // ------------------------------------------------------------------ helpers
 
+    /// <summary>
+    /// Conversation DTOs with participants, the newest message, the member's unread count and
+    /// the time of the latest activity — for the conversation list and for a (re)opened chat, so
+    /// the Messenger page shows the same row whichever way the chat was reached.
+    /// </summary>
     private async Task<List<ConversationDto>> BuildConversationDtos(
         List<Conversation> conversations, int myId, CancellationToken cancellationToken)
     {
@@ -296,6 +254,27 @@ public class MessagesController : ControllerBase
         {
             byConversation.TryGetValue(conversation.Id, out var rows);
             rows ??= new List<ConversationParticipant>();
+
+            var last = await _db.ChatMessages.AsNoTracking()
+                .Where(m => m.ConversationId == conversation.Id)
+                .OrderByDescending(m => m.SentAtUtc)
+                .ThenByDescending(m => m.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            // Unread = messages from the others after the member's read pointer (the member's
+            // own messages are never unread to them).
+            var unread = 0;
+            var me = rows.FirstOrDefault(p => p.UserId == myId);
+            if (me != null && last != null)
+            {
+                var lastReadId = me.LastReadMessageId;
+                unread = await _db.ChatMessages.CountAsync(
+                    m => m.ConversationId == conversation.Id
+                        && m.SenderId != myId
+                        && (lastReadId == null || m.Id > lastReadId.Value),
+                    cancellationToken);
+            }
+
             result.Add(new ConversationDto
             {
                 Id = conversation.Id,
@@ -303,10 +282,15 @@ public class MessagesController : ControllerBase
                 CircleId = conversation.CircleId,
                 OwnerId = conversation.OwnerId,
                 CreatedAtUtc = conversation.CreatedAtUtc,
+                LastActivityUtc = last != null && last.SentAtUtc > conversation.CreatedAtUtc
+                    ? last.SentAtUtc
+                    : conversation.CreatedAtUtc,
+                UnreadCount = unread,
                 Participants = rows
                     .Where(p => users.ContainsKey(p.UserId))
                     .Select(p => AuthorMapper.From(users[p.UserId]))
-                    .ToList()
+                    .ToList(),
+                LastMessage = last == null ? null : await ToMessageDto(last, myId, rows, users, cancellationToken)
             });
         }
         return result;

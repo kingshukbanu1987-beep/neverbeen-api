@@ -11,6 +11,12 @@ public class ConversationDto
     public ChatMessageDto? LastMessage { get; set; }
     public int UnreadCount { get; set; }
     public DateTime CreatedAtUtc { get; set; }
+
+    /// <summary>
+    /// Time of the latest activity: the newest message, or the creation time of a conversation
+    /// nobody has written in yet. The conversation list is ordered by it (newest first).
+    /// </summary>
+    public DateTime LastActivityUtc { get; set; }
 }
 
 public class ChatMessageDto

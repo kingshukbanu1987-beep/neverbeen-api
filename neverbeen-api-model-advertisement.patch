@@ -1,0 +1,363 @@
+diff --git a/Controllers/ModelAdsController.cs b/Controllers/ModelAdsController.cs
+new file mode 100644
+index 0000000..507ffd9
+--- /dev/null
++++ b/Controllers/ModelAdsController.cs
+@@ -0,0 +1,157 @@
++using System.Security.Claims;
++using System.Text.RegularExpressions;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.EntityFrameworkCore;
++using NeverBeen.API.Data;
++using NeverBeen.API.Dtos;
++using NeverBeen.API.Entities;
++
++namespace NeverBeen.API.Controllers;
++
++/// <summary>
++/// Advertising pool for the NeverBeen AI model portfolios.
++///
++/// The website owns the portfolio catalog and renders the advertisement itself (the right rail of
++/// the Community Home page and the sponsored cards inside the Journey feed). This controller only
++/// answers which models the studio has switched on for advertising — with their serving weight —
++/// and records how many members saw and opened each advertised portfolio, so the founder can see
++/// which models the advertisement actually reaches.
++///
++/// Both endpoints are public: the advertisement is shown to guests and signed-out visitors exactly
++/// as it is to signed-in members, and an anonymous view still has to be counted.
++/// </summary>
++[ApiController]
++[Route("api/models/ads")]
++public class ModelAdsController : ControllerBase
++{
++    private const int MaximumEventsPerRequest = 50;
++
++    private static readonly Regex ModelSlugPattern = new(
++        "^[a-z0-9]+(?:-[a-z0-9]+)*$",
++        RegexOptions.Compiled | RegexOptions.CultureInvariant);
++
++    private static readonly string[] EventTypes = ["impression", "click"];
++    private static readonly string[] Surfaces = ["rail", "feed"];
++
++    private readonly AppDbContext _db;
++
++    public ModelAdsController(AppDbContext db)
++    {
++        _db = db;
++    }
++
++    /// <summary>
++    /// Every portfolio in the pool, heaviest rotation first. The website treats a model that is
++    /// missing from this list as advertised (the studio advertises the whole catalog) and skips
++    /// only the models whose row says <c>IsActive = false</c>.
++    /// </summary>
++    [HttpGet]
++    [ProducesResponseType(typeof(ModelAdPoolDto), StatusCodes.Status200OK)]
++    public async Task<ActionResult<ModelAdPoolDto>> Pool(CancellationToken cancellationToken = default)
++    {
++        var items = await _db.ModelAds
++            .AsNoTracking()
++            .OrderByDescending(ad => ad.Weight)
++            .ThenBy(ad => ad.ModelSlug)
++            .Select(ad => new ModelAdDto
++            {
++                ModelSlug = ad.ModelSlug,
++                DisplayName = ad.DisplayName,
++                IsActive = ad.IsActive,
++                Weight = ad.Weight,
++                ImpressionCount = ad.ImpressionCount,
++                ClickCount = ad.ClickCount
++            })
++            .ToListAsync(cancellationToken);
++
++        return Ok(new ModelAdPoolDto { Items = items });
++    }
++
++    /// <summary>
++    /// Records a batch of advertisement impressions / clicks sent by the website. Events for a
++    /// slug the pool does not know are ignored (the website never invents slugs, and ignoring them
++    /// keeps an anonymous caller from growing the table), and the pool totals are updated in the
++    /// same transaction.
++    /// </summary>
++    [HttpPost("events")]
++    [ProducesResponseType(StatusCodes.Status202Accepted)]
++    public async Task<IActionResult> RecordEvents(
++        [FromBody] RecordModelAdEventsRequest request,
++        CancellationToken cancellationToken = default)
++    {
++        var events = request?.Events;
++        if (events == null || events.Count == 0)
++            return BadRequest(new { error = "At least one advertisement event is required." });
++        if (events.Count > MaximumEventsPerRequest)
++            return BadRequest(new { error = $"At most {MaximumEventsPerRequest} advertisement events may be sent at once." });
++
++        var normalised = new List<(string Slug, string Type, string Surface)>(events.Count);
++        foreach (var entry in events)
++        {
++            var slug = entry.ModelSlug?.Trim() ?? string.Empty;
++            var type = entry.Type?.Trim().ToLowerInvariant() ?? string.Empty;
++            var surface = entry.Surface?.Trim().ToLowerInvariant() ?? string.Empty;
++
++            if (!IsValidModelSlug(slug))
++                return BadRequest(new { error = "An advertisement event carries an invalid model slug." });
++            if (!EventTypes.Contains(type))
++                return BadRequest(new { error = "An advertisement event type must be \"impression\" or \"click\"." });
++            if (!Surfaces.Contains(surface))
++                return BadRequest(new { error = "An advertisement surface must be \"rail\" or \"feed\"." });
++
++            normalised.Add((slug, type, surface));
++        }
++
++        var viewerId = await ResolveViewerIdAsync(cancellationToken);
++        var now = DateTime.UtcNow;
++
++        var slugs = normalised.Select(entry => entry.Slug).Distinct().ToList();
++        var pool = await _db.ModelAds
++            .Where(ad => slugs.Contains(ad.ModelSlug))
++            .ToListAsync(cancellationToken);
++
++        var recorded = 0;
++        foreach (var group in normalised.GroupBy(entry => entry.Slug))
++        {
++            var advertisement = pool.FirstOrDefault(ad => ad.ModelSlug == group.Key);
++            if (advertisement == null) continue; // not part of the pool — nothing to count
++
++            foreach (var entry in group)
++            {
++                _db.ModelAdEvents.Add(new ModelAdEvent
++                {
++                    ModelSlug = entry.Slug,
++                    EventType = entry.Type,
++                    Surface = entry.Surface,
++                    ViewerId = viewerId,
++                    CreatedAtUtc = now
++                });
++                recorded += 1;
++            }
++
++            advertisement.ImpressionCount += group.Count(entry => entry.Type == "impression");
++            advertisement.ClickCount += group.Count(entry => entry.Type == "click");
++            advertisement.UpdatedAtUtc = now;
++        }
++
++        if (recorded == 0)
++            return Accepted(new { recorded });
++
++        await _db.SaveChangesAsync(cancellationToken);
++        return Accepted(new { recorded });
++    }
++
++    /// <summary>The signed-in member behind an advertisement view, or null for a guest / a stale token.</summary>
++    private async Task<int?> ResolveViewerIdAsync(CancellationToken cancellationToken)
++    {
++        if (User?.Identity?.IsAuthenticated != true) return null;
++        var raw = User.FindFirstValue(ClaimTypes.NameIdentifier);
++        if (!int.TryParse(raw, out var userId)) return null;
++        return await _db.Users.AnyAsync(user => user.Id == userId, cancellationToken) ? userId : null;
++    }
++
++    private static bool IsValidModelSlug(string? modelSlug) =>
++        !string.IsNullOrWhiteSpace(modelSlug) &&
++        modelSlug.Length <= 120 &&
++        ModelSlugPattern.IsMatch(modelSlug);
++}
+diff --git a/Data/AppDbContext.cs b/Data/AppDbContext.cs
+index 8fa97f9..56be20c 100644
+--- a/Data/AppDbContext.cs
++++ b/Data/AppDbContext.cs
+@@ -27,6 +27,10 @@ public class AppDbContext : DbContext
+     public DbSet<CommunityCommentTag> CommunityCommentTags => Set<CommunityCommentTag>();
+     public DbSet<CommentReaction> CommentReactions => Set<CommentReaction>();
+ 
++    // --- AI model advertisement (right rail + Journey feed on the website) --
++    public DbSet<ModelAd> ModelAds => Set<ModelAd>();
++    public DbSet<ModelAdEvent> ModelAdEvents => Set<ModelAdEvent>();
++
+     // --- Journey feed -----------------------------------------------------
+     public DbSet<JourneyPost> JourneyPosts => Set<JourneyPost>();
+     public DbSet<JourneyPostAudienceEntry> JourneyPostAudienceEntries => Set<JourneyPostAudienceEntry>();
+@@ -294,5 +298,24 @@ public class AppDbContext : DbContext
+         {
+             entity.HasIndex(h => new { h.UserId, h.PostId }).IsUnique();
+         });
++
++        modelBuilder.Entity<ModelAd>(entity =>
++        {
++            entity.HasIndex(ad => ad.ModelSlug).IsUnique();
++            entity.HasIndex(ad => new { ad.IsActive, ad.Weight });
++            entity.Property(ad => ad.Weight).HasDefaultValue(1);
++        });
++
++        modelBuilder.Entity<ModelAdEvent>(entity =>
++        {
++            entity.HasIndex(e => new { e.ModelSlug, e.CreatedAtUtc });
++            entity.HasIndex(e => new { e.Surface, e.CreatedAtUtc });
++            entity.HasIndex(e => e.ViewerId);
++
++            entity.HasOne(e => e.Viewer)
++                .WithMany()
++                .HasForeignKey(e => e.ViewerId)
++                .OnDelete(DeleteBehavior.SetNull);
++        });
+     }
+ }
+diff --git a/Dtos/ModelAdDtos.cs b/Dtos/ModelAdDtos.cs
+new file mode 100644
+index 0000000..6f9ec83
+--- /dev/null
++++ b/Dtos/ModelAdDtos.cs
+@@ -0,0 +1,47 @@
++using System.ComponentModel.DataAnnotations;
++
++namespace NeverBeen.API.Dtos;
++
++/// <summary>One AI model portfolio in the advertising pool, with her weight and totals.</summary>
++public class ModelAdDto
++{
++    public string ModelSlug { get; set; } = string.Empty;
++    public string? DisplayName { get; set; }
++    public bool IsActive { get; set; }
++    public int Weight { get; set; }
++    public int ImpressionCount { get; set; }
++    public int ClickCount { get; set; }
++}
++
++/// <summary>Answer of GET /api/models/ads — every advertised portfolio, heaviest rotation first.</summary>
++public class ModelAdPoolDto
++{
++    public List<ModelAdDto> Items { get; set; } = new();
++}
++
++/// <summary>One impression or click of an advertised portfolio.</summary>
++public class ModelAdEventRequest
++{
++    [Required]
++    [StringLength(120, MinimumLength = 2)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    /// <summary>"impression" or "click".</summary>
++    [Required]
++    [StringLength(16)]
++    public string Type { get; set; } = string.Empty;
++
++    /// <summary>"rail" (right rail of the Community Home) or "feed" (Journey feed card).</summary>
++    [Required]
++    [StringLength(16)]
++    public string Surface { get; set; } = string.Empty;
++}
++
++/// <summary>Body of POST /api/models/ads/events — one batch per advertisement view.</summary>
++public class RecordModelAdEventsRequest
++{
++    [Required]
++    [MinLength(1)]
++    [MaxLength(50)]
++    public List<ModelAdEventRequest> Events { get; set; } = new();
++}
+diff --git a/Entities/ModelAd.cs b/Entities/ModelAd.cs
+new file mode 100644
+index 0000000..bf9562b
+--- /dev/null
++++ b/Entities/ModelAd.cs
+@@ -0,0 +1,41 @@
++using System.ComponentModel.DataAnnotations;
++using System.ComponentModel.DataAnnotations.Schema;
++
++namespace NeverBeen.API.Entities;
++
++/// <summary>
++/// One AI model portfolio the NeverBeen website advertises — the right-rail panel below
++/// “Online Companions” and the sponsored cards inside the Journey feed.
++///
++/// The website owns the portfolio catalog (name, photographs, city and availability come from
++/// `data/ai-models/profiles.json` in the website repository); this row only decides whether the
++/// model takes part in the advertising rotation, how heavily she is rotated, and keeps the
++/// impression / click totals for the founder's reporting.
++/// </summary>
++[Table("ModelAds")]
++public class ModelAd
++{
++    public int Id { get; set; }
++
++    /// <summary>Stable URL slug of the portfolio shown at /ai-models/{slug} on the website.</summary>
++    [MaxLength(120)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    /// <summary>Display name as published by the website — kept for reporting only.</summary>
++    [MaxLength(160)]
++    public string? DisplayName { get; set; }
++
++    /// <summary>False removes the model from the advertising rotation without deleting her row.</summary>
++    public bool IsActive { get; set; } = true;
++
++    /// <summary>Rotation weight 1..10 — a heavier model is drawn more often by the website.</summary>
++    public int Weight { get; set; } = 1;
++
++    public int ImpressionCount { get; set; }
++
++    public int ClickCount { get; set; }
++
++    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
++
++    public DateTime? UpdatedAtUtc { get; set; }
++}
+diff --git a/Entities/ModelAdEvent.cs b/Entities/ModelAdEvent.cs
+new file mode 100644
+index 0000000..81511fc
+--- /dev/null
++++ b/Entities/ModelAdEvent.cs
+@@ -0,0 +1,33 @@
++using System.ComponentModel.DataAnnotations;
++using System.ComponentModel.DataAnnotations.Schema;
++
++namespace NeverBeen.API.Entities;
++
++/// <summary>
++/// One impression or click of an advertised AI model portfolio, as sent by the website in small
++/// batches. Counter totals are also kept on <see cref="ModelAd"/> so the founder can read the
++/// numbers without scanning this table; a nightly job may trim older events.
++/// </summary>
++[Table("ModelAdEvents")]
++public class ModelAdEvent
++{
++    public long Id { get; set; }
++
++    /// <summary>Slug of the advertised portfolio the member saw or opened.</summary>
++    [MaxLength(120)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    /// <summary>"impression" or "click".</summary>
++    [MaxLength(16)]
++    public string EventType { get; set; } = string.Empty;
++
++    /// <summary>Where the advertisement ran: "rail" (right rail panel) or "feed" (Journey feed).</summary>
++    [MaxLength(16)]
++    public string Surface { get; set; } = string.Empty;
++
++    /// <summary>The signed-in member, when the advertisement was seen by one; null for guests.</summary>
++    public int? ViewerId { get; set; }
++    public UserProfile? Viewer { get; set; }
++
++    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
++}
+diff --git a/README.md b/README.md
+index adedb80..68fc962 100644
+--- a/README.md
++++ b/README.md
+@@ -138,3 +138,16 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
+     created post carries its tagged companions without extra round trips.
+   - `POST /api/messagebook` accepts `imageUrl` and `CommentDto` answers it, so message
+     book entries with an attached photograph are stored and re-served.
++- **AI model advertisement (website ↔ API).** The Community Home shows a NeverBeen AI
++  Models advertisement — a right-rail panel below “Online Companions” (15 random
++  portfolios) and sponsored cards inside the Journey feed (four photographs of one model
++  when her folder holds them, otherwise one). The website renders it from its own catalog
++  (`data/ai-models/profiles.json`) and uses the API only to steer and measure it:
++  - `GET /api/models/ads` (public) answers the advertising pool — `ModelSlug`,
++    `DisplayName`, `IsActive`, `Weight` (1–10) and the impression / click totals. A model
++    missing from the pool is advertised with weight 1; a row with `IsActive = false`
++    pauses her.
++  - `POST /api/models/ads/events` (public, ≤ 50 events per call) records `impression` /
++    `click` events per `rail` / `feed` surface and increments the pool totals in the same
++    transaction. `ViewerId` is filled for signed-in members and stays null for guests.
++  - Tables and the 42-model starting pool ship with `neverbeen-database/schema.sql`.

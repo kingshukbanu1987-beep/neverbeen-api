@@ -28,6 +28,7 @@ public class AppDbContext : DbContext
     public DbSet<ModelMediaShare> ModelMediaShares => Set<ModelMediaShare>();
     public DbSet<ModelMediaLike> ModelMediaLikes => Set<ModelMediaLike>();
     public DbSet<ModelMediaComment> ModelMediaComments => Set<ModelMediaComment>();
+    public DbSet<ModelLiveChatStart> ModelLiveChatStarts => Set<ModelLiveChatStart>();
     public DbSet<CommunityCommentTag> CommunityCommentTags => Set<CommunityCommentTag>();
     public DbSet<CommentReaction> CommentReactions => Set<CommentReaction>();
 
@@ -236,6 +237,23 @@ public class AppDbContext : DbContext
                 table.HasCheckConstraint(
                     "CK_ModelMediaComments_MediaType",
                     "\"MediaType\" IN ('photo', 'video')");
+            });
+        });
+
+        modelBuilder.Entity<ModelLiveChatStart>(entity =>
+        {
+            entity.HasIndex(s => s.ModelSlug);
+
+            entity.HasOne(s => s.Viewer)
+                .WithMany()
+                .HasForeignKey(s => s.ViewerId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_ModelLiveChatStarts_ModelSlug",
+                    "\"ModelSlug\" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'");
             });
         });
 

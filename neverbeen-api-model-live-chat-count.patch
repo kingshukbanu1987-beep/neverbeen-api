@@ -1,0 +1,179 @@
+diff --git a/Controllers/ModelLiveChatController.cs b/Controllers/ModelLiveChatController.cs
+new file mode 100644
+index 0000000..2d227d7
+--- /dev/null
++++ b/Controllers/ModelLiveChatController.cs
+@@ -0,0 +1,88 @@
++using System.Security.Claims;
++using System.Text.RegularExpressions;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.EntityFrameworkCore;
++using NeverBeen.API.Data;
++using NeverBeen.API.Dtos;
++using NeverBeen.API.Entities;
++
++namespace NeverBeen.API.Controllers;
++
++/// <summary>
++/// Live Chat counts for the AI model directory. Each model's card shows how many Live Chats have
++/// been started with her. A chat is counted once, when the visitor's two-hour session begins.
++///
++/// Reading the counts is public. Starting a chat needs no sign-in: a signed-in member is recorded
++/// with their account, a guest without one.
++/// </summary>
++[ApiController]
++[Route("api/models")]
++public class ModelLiveChatController : ControllerBase
++{
++    private static readonly Regex ModelSlugPattern = new(
++        "^[a-z0-9]+(?:-[a-z0-9]+)*$",
++        RegexOptions.Compiled | RegexOptions.CultureInvariant);
++
++    private readonly AppDbContext _db;
++
++    public ModelLiveChatController(AppDbContext db)
++    {
++        _db = db;
++    }
++
++    /// <summary>Returns the Live Chat count of every model that has had at least one chat.</summary>
++    [HttpGet("live-chats")]
++    [ProducesResponseType(typeof(List<ModelLiveChatCountDto>), StatusCodes.Status200OK)]
++    public async Task<ActionResult<List<ModelLiveChatCountDto>>> GetCounts(
++        CancellationToken cancellationToken = default)
++    {
++        var rows = await _db.ModelLiveChatStarts
++            .AsNoTracking()
++            .GroupBy(s => s.ModelSlug)
++            .Select(g => new ModelLiveChatCountDto { ModelSlug = g.Key, LiveChatCount = g.Count() })
++            .OrderBy(r => r.ModelSlug)
++            .ToListAsync(cancellationToken);
++
++        return Ok(rows);
++    }
++
++    /// <summary>Records that a visitor started a Live Chat with a model, and returns the new count.</summary>
++    [HttpPost("{modelSlug}/live-chats")]
++    [ProducesResponseType(typeof(ModelLiveChatStartDto), StatusCodes.Status200OK)]
++    public async Task<ActionResult<ModelLiveChatStartDto>> RecordStart(
++        [FromRoute] string modelSlug,
++        CancellationToken cancellationToken = default)
++    {
++        if (!IsValidModelSlug(modelSlug))
++            return BadRequest(new { error = "The model slug is invalid." });
++
++        var viewerId = await ResolveViewerIdAsync(cancellationToken);
++
++        _db.ModelLiveChatStarts.Add(new ModelLiveChatStart
++        {
++            ModelSlug = modelSlug,
++            ViewerId = viewerId,
++            CreatedAtUtc = DateTime.UtcNow
++        });
++        await _db.SaveChangesAsync(cancellationToken);
++
++        var total = await _db.ModelLiveChatStarts.CountAsync(
++            s => s.ModelSlug == modelSlug,
++            cancellationToken);
++
++        return Ok(new ModelLiveChatStartDto { ModelSlug = modelSlug, LiveChatCount = total });
++    }
++
++    private async Task<int?> ResolveViewerIdAsync(CancellationToken cancellationToken)
++    {
++        if (User?.Identity?.IsAuthenticated != true) return null;
++        var raw = User.FindFirstValue(ClaimTypes.NameIdentifier);
++        if (!int.TryParse(raw, out var userId)) return null;
++        return await _db.Users.AnyAsync(user => user.Id == userId, cancellationToken) ? userId : null;
++    }
++
++    private static bool IsValidModelSlug(string? modelSlug) =>
++        !string.IsNullOrWhiteSpace(modelSlug) &&
++        modelSlug.Length <= 120 &&
++        ModelSlugPattern.IsMatch(modelSlug);
++}
+diff --git a/Data/AppDbContext.cs b/Data/AppDbContext.cs
+index b172be8..46f4da0 100644
+--- a/Data/AppDbContext.cs
++++ b/Data/AppDbContext.cs
+@@ -28,6 +28,7 @@ public class AppDbContext : DbContext
+     public DbSet<ModelMediaShare> ModelMediaShares => Set<ModelMediaShare>();
+     public DbSet<ModelMediaLike> ModelMediaLikes => Set<ModelMediaLike>();
+     public DbSet<ModelMediaComment> ModelMediaComments => Set<ModelMediaComment>();
++    public DbSet<ModelLiveChatStart> ModelLiveChatStarts => Set<ModelLiveChatStart>();
+     public DbSet<CommunityCommentTag> CommunityCommentTags => Set<CommunityCommentTag>();
+     public DbSet<CommentReaction> CommentReactions => Set<CommentReaction>();
+ 
+@@ -239,6 +240,23 @@ public class AppDbContext : DbContext
+             });
+         });
+ 
++        modelBuilder.Entity<ModelLiveChatStart>(entity =>
++        {
++            entity.HasIndex(s => s.ModelSlug);
++
++            entity.HasOne(s => s.Viewer)
++                .WithMany()
++                .HasForeignKey(s => s.ViewerId)
++                .OnDelete(DeleteBehavior.SetNull);
++
++            entity.ToTable(table =>
++            {
++                table.HasCheckConstraint(
++                    "CK_ModelLiveChatStarts_ModelSlug",
++                    "\"ModelSlug\" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'");
++            });
++        });
++
+         modelBuilder.Entity<CommunityCommentTag>(entity =>
+         {
+             entity.HasIndex(t => new { t.CommentId, t.UserId }).IsUnique();
+diff --git a/Dtos/ModelLiveChatDtos.cs b/Dtos/ModelLiveChatDtos.cs
+new file mode 100644
+index 0000000..33cffff
+--- /dev/null
++++ b/Dtos/ModelLiveChatDtos.cs
+@@ -0,0 +1,15 @@
++namespace NeverBeen.API.Dtos;
++
++/// <summary>One model's Live Chat count, as GET /api/models/live-chats returns it.</summary>
++public class ModelLiveChatCountDto
++{
++    public string ModelSlug { get; set; } = string.Empty;
++    public int LiveChatCount { get; set; }
++}
++
++/// <summary>The answer of POST /api/models/{modelSlug}/live-chats: the count after the new chat.</summary>
++public class ModelLiveChatStartDto
++{
++    public string ModelSlug { get; set; } = string.Empty;
++    public int LiveChatCount { get; set; }
++}
+diff --git a/Entities/ModelLiveChatStart.cs b/Entities/ModelLiveChatStart.cs
+new file mode 100644
+index 0000000..227f9f3
+--- /dev/null
++++ b/Entities/ModelLiveChatStart.cs
+@@ -0,0 +1,22 @@
++using System.ComponentModel.DataAnnotations;
++using System.ComponentModel.DataAnnotations.Schema;
++
++namespace NeverBeen.API.Entities;
++
++/// <summary>
++/// One Live Chat started with an AI model: written when a visitor's two-hour chat session begins.
++/// The model's card counts these rows.
++/// </summary>
++[Table("ModelLiveChatStarts")]
++public class ModelLiveChatStart
++{
++    public long Id { get; set; }
++
++    [MaxLength(120)]
++    public string ModelSlug { get; set; } = string.Empty;
++
++    public int? ViewerId { get; set; }
++    public UserProfile? Viewer { get; set; }
++
++    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
++}

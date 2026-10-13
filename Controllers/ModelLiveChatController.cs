@@ -9,18 +9,27 @@ using NeverBeen.API.Entities;
 namespace NeverBeen.API.Controllers;
 
 /// <summary>
-/// Live Chat counts for the AI model directory. Each model's card shows how many Live Chats have
-/// been started with her. A chat is counted once, when the visitor's two-hour session begins.
+/// Live Chat counters for the AI model directory. Each model's card shows how many chat sessions
+/// are live with her right now and how many chats are already over. A session is counted live
+/// when the visitor's two-hour session begins, and moves to the past count when its end is
+/// recorded — or when the two hours run out, for sessions whose tab never said goodbye.
 ///
-/// Reading the counts is public. Starting a chat needs no sign-in: a signed-in member is recorded
-/// with their account, a guest without one.
+/// Reading the counts is public. Starting or ending a chat needs no sign-in: a signed-in member
+/// is recorded with their account, a guest without one.
 /// </summary>
 [ApiController]
 [Route("api/models")]
 public class ModelLiveChatController : ControllerBase
 {
+    /// <summary>A chat session lasts two hours; an unended start older than that is past.</summary>
+    private static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(2);
+
     private static readonly Regex ModelSlugPattern = new(
         "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex SessionKeyPattern = new(
+        "^[A-Za-z0-9-]{8,64}$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private readonly AppDbContext _db;
@@ -30,47 +39,115 @@ public class ModelLiveChatController : ControllerBase
         _db = db;
     }
 
-    /// <summary>Returns the Live Chat count of every model that has had at least one chat.</summary>
+    /// <summary>Returns the live and past chat counts of every model that has had a chat.</summary>
     [HttpGet("live-chats")]
     [ProducesResponseType(typeof(List<ModelLiveChatCountDto>), StatusCodes.Status200OK)]
     public async Task<ActionResult<List<ModelLiveChatCountDto>>> GetCounts(
         CancellationToken cancellationToken = default)
     {
+        var liveSince = DateTime.UtcNow - SessionLifetime;
+
         var rows = await _db.ModelLiveChatStarts
             .AsNoTracking()
             .GroupBy(s => s.ModelSlug)
-            .Select(g => new ModelLiveChatCountDto { ModelSlug = g.Key, LiveChatCount = g.Count() })
+            .Select(g => new ModelLiveChatCountDto
+            {
+                ModelSlug = g.Key,
+                LiveNowCount = g.Count(s => s.EndedAtUtc == null && s.CreatedAtUtc > liveSince),
+                PastChatCount = g.Count(s => s.EndedAtUtc != null || s.CreatedAtUtc <= liveSince)
+            })
             .OrderBy(r => r.ModelSlug)
             .ToListAsync(cancellationToken);
 
         return Ok(rows);
     }
 
-    /// <summary>Records that a visitor started a Live Chat with a model, and returns the new count.</summary>
+    /// <summary>Records that a visitor started a Live Chat, and returns the fresh counts.</summary>
     [HttpPost("{modelSlug}/live-chats")]
     [ProducesResponseType(typeof(ModelLiveChatStartDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<ModelLiveChatStartDto>> RecordStart(
         [FromRoute] string modelSlug,
+        [FromBody] ModelLiveChatSessionRequest? request = null,
         CancellationToken cancellationToken = default)
     {
         if (!IsValidModelSlug(modelSlug))
             return BadRequest(new { error = "The model slug is invalid." });
 
-        var viewerId = await ResolveViewerIdAsync(cancellationToken);
+        var sessionKey = NormalizeSessionKey(request?.SessionKey);
 
-        _db.ModelLiveChatStarts.Add(new ModelLiveChatStart
-        {
-            ModelSlug = modelSlug,
-            ViewerId = viewerId,
-            CreatedAtUtc = DateTime.UtcNow
-        });
-        await _db.SaveChangesAsync(cancellationToken);
-
-        var total = await _db.ModelLiveChatStarts.CountAsync(
-            s => s.ModelSlug == modelSlug,
+        // One count per session: the same key is never counted twice, however often it is sent.
+        var alreadyCounted = sessionKey != null && await _db.ModelLiveChatStarts.AnyAsync(
+            s => s.ModelSlug == modelSlug && s.SessionKey == sessionKey,
             cancellationToken);
 
-        return Ok(new ModelLiveChatStartDto { ModelSlug = modelSlug, LiveChatCount = total });
+        if (!alreadyCounted)
+        {
+            var viewerId = await ResolveViewerIdAsync(cancellationToken);
+
+            _db.ModelLiveChatStarts.Add(new ModelLiveChatStart
+            {
+                ModelSlug = modelSlug,
+                SessionKey = sessionKey,
+                ViewerId = viewerId,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+
+        return Ok(await CountsForAsync(modelSlug, sessionKey, cancellationToken));
+    }
+
+    /// <summary>Records that a Live Chat session ended, and returns the fresh counts.</summary>
+    [HttpPost("{modelSlug}/live-chats/end")]
+    [ProducesResponseType(typeof(ModelLiveChatStartDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ModelLiveChatStartDto>> RecordEnd(
+        [FromRoute] string modelSlug,
+        [FromBody] ModelLiveChatSessionRequest? request = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsValidModelSlug(modelSlug))
+            return BadRequest(new { error = "The model slug is invalid." });
+
+        var sessionKey = NormalizeSessionKey(request?.SessionKey);
+
+        if (sessionKey != null)
+        {
+            var start = await _db.ModelLiveChatStarts.FirstOrDefaultAsync(
+                s => s.ModelSlug == modelSlug && s.SessionKey == sessionKey,
+                cancellationToken);
+
+            // Ending is idempotent: an unknown key, or one that ended already, changes nothing.
+            if (start != null && start.EndedAtUtc == null)
+            {
+                start.EndedAtUtc = DateTime.UtcNow;
+                await _db.SaveChangesAsync(cancellationToken);
+            }
+        }
+
+        return Ok(await CountsForAsync(modelSlug, sessionKey, cancellationToken));
+    }
+
+    private async Task<ModelLiveChatStartDto> CountsForAsync(
+        string modelSlug,
+        string? sessionKey,
+        CancellationToken cancellationToken)
+    {
+        var liveSince = DateTime.UtcNow - SessionLifetime;
+
+        var liveNow = await _db.ModelLiveChatStarts.CountAsync(
+            s => s.ModelSlug == modelSlug && s.EndedAtUtc == null && s.CreatedAtUtc > liveSince,
+            cancellationToken);
+        var past = await _db.ModelLiveChatStarts.CountAsync(
+            s => s.ModelSlug == modelSlug && (s.EndedAtUtc != null || s.CreatedAtUtc <= liveSince),
+            cancellationToken);
+
+        return new ModelLiveChatStartDto
+        {
+            ModelSlug = modelSlug,
+            SessionKey = sessionKey,
+            LiveNowCount = liveNow,
+            PastChatCount = past
+        };
     }
 
     private async Task<int?> ResolveViewerIdAsync(CancellationToken cancellationToken)
@@ -85,4 +162,10 @@ public class ModelLiveChatController : ControllerBase
         !string.IsNullOrWhiteSpace(modelSlug) &&
         modelSlug.Length <= 120 &&
         ModelSlugPattern.IsMatch(modelSlug);
+
+    private static string? NormalizeSessionKey(string? sessionKey)
+    {
+        var trimmed = sessionKey?.Trim();
+        return !string.IsNullOrEmpty(trimmed) && SessionKeyPattern.IsMatch(trimmed) ? trimmed : null;
+    }
 }

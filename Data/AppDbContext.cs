@@ -243,6 +243,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<ModelLiveChatStart>(entity =>
         {
             entity.HasIndex(s => s.ModelSlug);
+            entity.HasIndex(s => new { s.ModelSlug, s.SessionKey });
 
             entity.HasOne(s => s.Viewer)
                 .WithMany()

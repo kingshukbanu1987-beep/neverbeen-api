@@ -6,7 +6,8 @@ namespace NeverBeen.API.Dtos;
 /// One turn of the AI model Live Chat, as the NeverBeen website sends it to
 /// <c>POST /api/ai-chat</c>. The visitor's input travels in <see cref="Message"/> and the model's
 /// character profile — her <c>personality/characterdatabase.json</c> — in
-/// <see cref="CharacterProfile"/>. Everything else is optional context for a better answer.
+/// <see cref="CharacterProfile"/>; her biography — her <c>personality/biography.json</c> — travels
+/// with them in <see cref="Biography"/>. Everything else is optional context for a better answer.
 /// </summary>
 public class AiChatRequest
 {
@@ -19,6 +20,15 @@ public class AiChatRequest
     /// Required, and must be a JSON object.
     /// </summary>
     public JsonElement? CharacterProfile { get; set; }
+
+    /// <summary>
+    /// The model's biography: the contents of
+    /// <c>public/NeverBeenModels/&lt;Album&gt;/personality/biography.json</c> — a <c>meta</c> block,
+    /// her own <c>profile</c> (city, age, height, measurements, rate…) and the <c>biography</c> of her
+    /// fictional NeverBeen life (family, studies, career, hobbies, memories…).
+    /// Optional for older clients; when sent it must be a JSON object.
+    /// </summary>
+    public JsonElement? Biography { get; set; }
 
     /// <summary>The model's public card (name, handle, city and age).</summary>
     public AiChatModelInfo? Model { get; set; }

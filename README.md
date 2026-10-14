@@ -105,6 +105,7 @@ Request (JSON; the website sends it through its same-origin `/neverbeen-api/api/
 {
   "message": "What do you love most about Kolkata?",
   "characterProfile": { "meta": { "...": "..." }, "corePersonality": { "...": "..." } },
+  "biography": { "meta": { "...": "..." }, "profile": { "city": "Kolkata", "age": "24", "...": "..." }, "biography": { "summary": "…", "career": [ "…" ], "...": "..." } },
   "model": { "slug": "alisha-bhattacharya", "name": "Alisha Bhattacharya", "handle": "@alisha.bhattacharya", "location": "Kolkata, India", "age": "24" },
   "user": { "name": "Rahul Verma", "firstName": "Rahul" },
   "history": [ { "role": "model", "text": "Hey Rahul!" }, { "role": "user", "text": "What do you love most about Kolkata?" } ],
@@ -117,14 +118,23 @@ Request (JSON; the website sends it through its same-origin `/neverbeen-api/api/
 - `message` (the visitor's input) and `characterProfile` (the model's
   `public/NeverBeenModels/<Album>/personality/characterdatabase.json`, as a JSON object)
   are **required**; everything else is optional context.
+- `biography` is the model's `public/NeverBeenModels/<Album>/personality/biography.json` (a
+  JSON object): her own `profile` exactly as the website shows it, plus the `biography` of her
+  fictional NeverBeen life — family, studies, career, hobbies, ambitions, memories. The website
+  sends it with **every** turn. It is optional so older clients keep working; when present it
+  must be an object of at most 60 000 characters once its `_doc` notes are removed. Gemini is
+  told to answer questions about her life from it in the first person, that the profile wins over
+  the biography, and to say honestly that the story is fictional if a visitor sincerely asks.
 - Response `200`: `{ "ok": true, "reply": "…", "provider": "gemini", "model": "gemini-2.5-flash" }`.
   Blank lines in `reply` separate the messages the chat window sends one after another.
-- Errors: `400` (`empty-message`, `missing-character-profile`, `character-profile-too-large`),
+- Errors: `400` (`empty-message`, `missing-character-profile`, `character-profile-too-large`,
+  `invalid-biography`, `biography-too-large`),
   `429` (more than 30 turns a minute from one client, or Gemini's own quota), `502`
   (`ai-failed` / `ai-empty` / `ai-timeout`) and `503 ai-unavailable` when `GEMINI_API_KEY` is
   not set. On any error the website answers from the model's built-in engine.
 - The studio's chat rules are fixed on the server (`Services/AiChatPrompt.cs`). The character
-  profile shapes her personality, voice and behaviour, but it cannot switch those rules off.
+  profile shapes her personality, voice and behaviour and the biography supplies her life story,
+  but neither can switch those rules off.
 - No database table is involved: chat turns are not stored.
 
 ## Notes

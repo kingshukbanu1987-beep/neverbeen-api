@@ -7,7 +7,8 @@ namespace NeverBeen.API.Controllers;
 
 /// <summary>
 /// The AI model Live Chat. The website sends the visitor's message together with the model's
-/// character profile (her <c>personality/characterdatabase.json</c>); this endpoint calls Google
+/// character profile (her <c>personality/characterdatabase.json</c>) and her biography (her
+/// <c>personality/biography.json</c>: her profile and her life story); this endpoint calls Google
 /// Gemini (<c>gemini-2.5-flash</c>) with the secret <c>GEMINI_API_KEY</c> held only on the server,
 /// and returns her finished answer.
 ///
@@ -26,7 +27,10 @@ public class AiChatController : ControllerBase
     /// <summary>Requests per client per minute.</summary>
     public const int RequestsPerMinute = 30;
 
-    /// <summary>A turn is small: the message, the last messages, the dossier and the profile.</summary>
+    /// <summary>
+    /// A turn is small: the message, the last messages, the dossier, the character profile and the
+    /// biography (each of the two files is capped at 60 000 characters by <see cref="AiChatPrompt"/>).
+    /// </summary>
     private const long MaxBodyBytes = 256 * 1024;
 
     private readonly GeminiChatService _gemini;

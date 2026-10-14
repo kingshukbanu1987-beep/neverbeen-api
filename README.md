@@ -111,6 +111,7 @@ Request (JSON; the website sends it through its same-origin `/neverbeen-api/api/
   "history": [ { "role": "model", "text": "Hey Rahul!" }, { "role": "user", "text": "What do you love most about Kolkata?" } ],
   "dossier": "…facts about her and the studio…",
   "reading": { "english": "…", "intent": "question" },
+  "language": { "code": "bn", "label": "Bengali", "romanised": true },
   "personal": { "answers": { "city": "Delhi" }, "nextTopic": "" }
 }
 ```
@@ -125,13 +126,26 @@ Request (JSON; the website sends it through its same-origin `/neverbeen-api/api/
   must be an object of at most 60 000 characters once its `_doc` notes are removed. Gemini is
   told to answer questions about her life from it in the first person, that the profile wins over
   the biography, and to say honestly that the story is fictional if a visitor sincerely asks.
+- `language` is the language the visitor settled into, when the website's reading desk read one:
+  `code` (`bn`, `hi`, `ur`, `fa`, `ar`, `tr`, `es`, `ms`), `label` (its English name) and
+  `romanised: true` when it was written in Latin letters. She is then told to answer in that same
+  Romanised language and to keep answering in it; without it the conversation stays in English.
 - Response `200`: `{ "ok": true, "reply": "…", "provider": "gemini", "model": "gemini-2.5-flash" }`.
   Blank lines in `reply` separate the messages the chat window sends one after another.
 - Errors: `400` (`empty-message`, `missing-character-profile`, `character-profile-too-large`,
   `invalid-biography`, `biography-too-large`),
   `429` (more than 30 turns a minute from one client, or Gemini's own quota), `502`
   (`ai-failed` / `ai-empty` / `ai-timeout`) and `503 ai-unavailable` when `GEMINI_API_KEY` is
-  not set. On any error the website answers from the model's built-in engine.
+  not set. On any error the website answers from the model's built-in engine, and `502 ai-empty` is
+  also what an answer that was nothing but bot lines comes back as — see the next bullet.
+- **She never answers like a chatbot (requirement L).** The server's rules forbid the software
+  voice (`Services/AiChatPrompt.cs`), and the reply itself is scrubbed before it is returned:
+  `AiChatPrompt.InHerVoice()` takes out the sentences that read like a machine ("As an AI…", "How
+  can I help you today?", "I hope this helps", a database that got mentioned, a bulleted list, an
+  "Assistant:" label) and keeps the rest of what she said. An answer that is already hers is
+  returned character for character; an answer that was nothing but such lines returns `502
+  ai-empty`. The website keeps the same list (`src/app/pages/ai-models/chat/chat-her-voice.ts`) and
+  checks every answer again before she says it, whoever wrote it.
 - The studio's chat rules are fixed on the server (`Services/AiChatPrompt.cs`). The character
   profile shapes her personality, voice and behaviour and the biography supplies her life story,
   but neither can switch those rules off.

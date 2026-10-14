@@ -30,6 +30,13 @@ public class AiChatRequest
     /// </summary>
     public JsonElement? Biography { get; set; }
 
+    /// <summary>
+    /// The language the visitor has settled into, when the website read one — Romanised Bengali,
+    /// Hindi, Urdu, Persian, Arabic, Turkish, Spanish or Malay, written in Latin letters. Optional:
+    /// older clients do not send it, and she answers a language in English then.
+    /// </summary>
+    public AiChatLanguage? Language { get; set; }
+
     /// <summary>The model's public card (name, handle, city and age).</summary>
     public AiChatModelInfo? Model { get; set; }
 
@@ -47,6 +54,23 @@ public class AiChatRequest
 
     /// <summary>The visitor's personal answers so far and the one question that is due.</summary>
     public AiChatPersonal? Personal { get; set; }
+}
+
+/// <summary>
+/// The visitor's own language, as the website's reading desk read it: the code, its English name,
+/// and whether it was written in Latin letters (Romanised) — which is the one case she answers in
+/// that language rather than in English.
+/// </summary>
+public class AiChatLanguage
+{
+    /// <summary>The code the website read: <c>bn</c>, <c>hi</c>, <c>ur</c>, <c>fa</c>, <c>ar</c>, <c>tr</c>, <c>es</c> or <c>ms</c>.</summary>
+    public string? Code { get; set; }
+
+    /// <summary>The English name of that language: <c>Bengali</c>.</summary>
+    public string? Label { get; set; }
+
+    /// <summary>True when it was written in Latin letters, so her answer goes back the same way.</summary>
+    public bool? Romanised { get; set; }
 }
 
 public class AiChatModelInfo

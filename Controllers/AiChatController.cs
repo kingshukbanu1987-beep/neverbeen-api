@@ -16,6 +16,10 @@ namespace NeverBeen.API.Controllers;
 /// (<see cref="RateLimitPolicy"/>). Without a configured key it answers
 /// <c>503 { ok: false, error: "ai-unavailable" }</c> and the website answers from the model's own
 /// built-in engine instead, so the chat always works.
+///
+/// Every answer is put through <see cref="AiChatPrompt.InHerVoice"/> before it is returned
+/// (requirement L): a line that reads like software is taken out of it, and an answer that was
+/// nothing but such lines answers <c>502 ai-empty</c> so the website speaks in her own words.
 /// </summary>
 [ApiController]
 [Route("api/ai-chat")]
@@ -70,7 +74,15 @@ public class AiChatController : ControllerBase
             return StatusCode(status, new { ok = false, error = result.Error });
         }
 
-        return Ok(new AiChatResponse { Reply = result.Reply, Model = GeminiChatService.ChatModel });
+        // L — she is read before she speaks. A reply that reads like a chatbot ("As an AI…", "How can I
+        // help you today?", a bulleted list, a mention of a database) has those sentences taken out
+        // here, on the server, so a bot line never travels to the website at all. When nothing of the
+        // answer survives, the website is told the model came back empty and answers in her own words.
+        var reply = AiChatPrompt.InHerVoice(result.Reply);
+        if (reply.Length == 0)
+            return StatusCode(StatusCodes.Status502BadGateway, new { ok = false, error = "ai-empty" });
+
+        return Ok(new AiChatResponse { Reply = reply, Model = GeminiChatService.ChatModel });
     }
 
     /// <summary>

@@ -7,6 +7,9 @@ using NeverBeen.API.Data;
 using NeverBeen.API.Middleware;
 using NeverBeen.API.Services;
 using System.Text;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
+using NeverBeen.API.Controllers;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -99,6 +102,33 @@ builder.Services.AddScoped<IOauthLoginProvider, MicrosoftOauthLoginProvider>();
 builder.Services.AddSingleton<JwtTokenService>();
 
 // ---------------------------------------------------------------------------
+// AI model Live Chat (POST /api/ai-chat) — Google Gemini gemini-2.5-flash.
+// The key is a server-side secret: set the GEMINI_API_KEY environment variable
+// (Azure App Service -> Configuration -> Application settings, or
+// `dotnet user-secrets set GEMINI_API_KEY <key>` locally). Never put it in
+// appsettings.json or in the website. Without it the endpoint answers 503 and
+// the website falls back to the model's built-in engine.
+// ---------------------------------------------------------------------------
+builder.Services.AddHttpClient<GeminiChatService>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(45);
+});
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy(AiChatController.RateLimitPolicy, context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            AiChatController.ClientKey(context),
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = AiChatController.RequestsPerMinute,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+});
+
+// ---------------------------------------------------------------------------
 // CORS for the Angular frontend. List the allowed origins (comma separated)
 // in Cors:AllowedOrigins. When the list is empty any origin is allowed -
 // only use this during local development.
@@ -144,6 +174,7 @@ app.UseSwagger();
 app.UseSwaggerUI();
 
 app.UseCors();
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 

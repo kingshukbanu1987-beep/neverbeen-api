@@ -42,11 +42,12 @@ NeverBeen.API/
 │   ├── ModerationController.cs      abuse reports, blocks, hidden posts
 │   ├── GalleryController.cs         photos (bytes)
 │   ├── GalleryAlbumsController.cs   albums
-│   └── LookupController.cs          countries, cities, professions, genders
+│   ├── LookupController.cs          countries, cities, professions, genders
+│   └── AiChatController.cs          AI model Live Chat → Google Gemini (gemini-2.5-flash)
 ├── Data/                            AppDbContext, DbInitializer, GeoSeedData
 ├── Entities/                        EF entities 1:1 with the Supabase tables
 ├── Dtos/                            request/response models + mappers
-├── Services/                        JwtTokenService, OAuth providers
+├── Services/                        JwtTokenService, OAuth providers, GeminiChatService
 ├── Common/                          constants, validation, helpers
 └── Middleware/                      JSON error handling
 ```
@@ -84,6 +85,47 @@ see [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide.
 > password has also been committed to Git history before: **rotate it in Supabase**
 > (Database settings → Reset database password) and update the connection string.
 > Anyone with the JWT signing key can forge login tokens — keep both secret.
+
+## AI model Live Chat (Gemini)
+
+`POST /api/ai-chat` answers the website's AI model Live Chat with **Google Gemini
+`gemini-2.5-flash`**. The Gemini API key is a **server-side secret** that lives only in the
+**`GEMINI_API_KEY` environment variable** of this API — it is never in `appsettings.json`,
+never in the website and never sent back to a browser.
+
+| Where | How to set `GEMINI_API_KEY` |
+|---|---|
+| Azure App Service | *Configuration → Application settings → New application setting* — name `GEMINI_API_KEY`, value = the key → *Save* (the app restarts) |
+| Windows VPS / IIS | System environment variable `GEMINI_API_KEY`, or `<environmentVariable name="GEMINI_API_KEY" value="…" />` in `web.config` |
+| Local development | `dotnet user-secrets set GEMINI_API_KEY <key>` (or `export GEMINI_API_KEY=<key>`) |
+
+Request (JSON; the website sends it through its same-origin `/neverbeen-api/api/ai-chat` proxy):
+
+```json
+{
+  "message": "What do you love most about Kolkata?",
+  "characterProfile": { "meta": { "...": "..." }, "corePersonality": { "...": "..." } },
+  "model": { "slug": "alisha-bhattacharya", "name": "Alisha Bhattacharya", "handle": "@alisha.bhattacharya", "location": "Kolkata, India", "age": "24" },
+  "user": { "name": "Rahul Verma", "firstName": "Rahul" },
+  "history": [ { "role": "model", "text": "Hey Rahul!" }, { "role": "user", "text": "What do you love most about Kolkata?" } ],
+  "dossier": "…facts about her and the studio…",
+  "reading": { "english": "…", "intent": "question" },
+  "personal": { "answers": { "city": "Delhi" }, "nextTopic": "" }
+}
+```
+
+- `message` (the visitor's input) and `characterProfile` (the model's
+  `public/NeverBeenModels/<Album>/personality/characterdatabase.json`, as a JSON object)
+  are **required**; everything else is optional context.
+- Response `200`: `{ "ok": true, "reply": "…", "provider": "gemini", "model": "gemini-2.5-flash" }`.
+  Blank lines in `reply` separate the messages the chat window sends one after another.
+- Errors: `400` (`empty-message`, `missing-character-profile`, `character-profile-too-large`),
+  `429` (more than 30 turns a minute from one client, or Gemini's own quota), `502`
+  (`ai-failed` / `ai-empty` / `ai-timeout`) and `503 ai-unavailable` when `GEMINI_API_KEY` is
+  not set. On any error the website answers from the model's built-in engine.
+- The studio's chat rules are fixed on the server (`Services/AiChatPrompt.cs`). The character
+  profile shapes her personality, voice and behaviour, but it cannot switch those rules off.
+- No database table is involved: chat turns are not stored.
 
 ## Notes
 

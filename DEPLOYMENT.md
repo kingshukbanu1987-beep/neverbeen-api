@@ -150,6 +150,12 @@ sets `RollForward=Major`, which lets the published app start on the newer runtim
 App Service stack (set *Configuration → General settings → Stack* to **.NET 8**). Upgrading
 the project to `net8.0` is the recommended long-term fix.
 
+**AI model Live Chat key:** the website's Live Chat (`POST /api/ai-chat`) calls Google Gemini
+with a key that only this API knows. In the App Service open *Configuration → Application
+settings → New application setting*, add **`GEMINI_API_KEY`** with the Gemini key and press
+*Save*. Without it the endpoint answers `503` and the website falls back to the model's
+built-in chat engine.
+
 ## Step 3 — Point the Angular website at the API
 
 1. In your **Angular repo** set the API base URL (typically
@@ -205,6 +211,9 @@ If you skip OAuth, everything else still works.
 5. Complete a sign-up / registration from the site, then a login; the row appears
    in Supabase → `Users`.
 6. (If configured) OAuth sign-in round-trips back to `/auth/callback` and logs you in.
+7. (If `GEMINI_API_KEY` is set) open a model's **Live Chat** on the site, introduce yourself
+   and ask her a question: DevTools → Network shows `POST /neverbeen-api/api/ai-chat` → **200**
+   with `"provider": "gemini"`.
 
 ## Troubleshooting
 

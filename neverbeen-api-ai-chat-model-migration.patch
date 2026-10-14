@@ -1,0 +1,34 @@
+diff --git a/Services/GeminiChatService.cs b/Services/GeminiChatService.cs
+--- a/Services/GeminiChatService.cs
++++ b/Services/GeminiChatService.cs
+@@ -12,7 +12,7 @@
+ }
+ 
+ /// <summary>
+-/// Calls Google Gemini (<c>gemini-2.5-flash</c>) for the AI model Live Chat.
++/// Calls Google Gemini (<c>gemini-3.6-flash</c>) for the AI model Live Chat.
+ ///
+ /// The API key is a server-side secret read from the <c>GEMINI_API_KEY</c> environment variable
+ /// (Azure App Service → Configuration → Application settings, or
+@@ -26,7 +26,7 @@
+     public const string ApiKeySetting = "GEMINI_API_KEY";
+ 
+     /// <summary>The Gemini model used by the AI model Live Chat.</summary>
+-    public const string ChatModel = "gemini-2.5-flash";
++    public const string ChatModel = "gemini-3.6-flash";
+ 
+     private const string EndpointTemplate =
+         "https://generativelanguage.googleapis.com/v1beta/models/{0}:generateContent";
+@@ -68,9 +68,9 @@
+             {
+                 temperature = 0.85,
+                 topP = 0.95,
+-                maxOutputTokens = 800,
+-                // A chat line needs no long deliberation: thinking off keeps her answers quick.
+-                thinkingConfig = new { thinkingBudget = 0 },
++                maxOutputTokens = 2048,
++                // Gemini 3 uses thinkingLevel rather than the Gemini 2.5 token budget.
++                thinkingConfig = new { thinkingLevel = "low" },
+             },
+         };
+ 
